@@ -1,0 +1,16 @@
+{
+  "name": "bunni-analysis",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "bignumber.js": "^9.1.2",
+    "chalk": "^5.4.1",
+    "graphql-request": "^7.1.2"
+  }
+}

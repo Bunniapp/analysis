@@ -1,0 +1,52 @@
+export type Category = "Retail" | "MEV Bot" | "Bunni Bot";
+
+export interface Label {
+    name: string;
+    category: Category;
+}
+
+export const LABELS: Record<string, Label> = {
+    "0x0000000000001ff3684f28c67538d4d072c22734": { name: "0x Allowance Holder", category: "Retail" },
+    "0x0000002c67d68170c8ce06fe78d7e37895c41255": { name: "Bunni Arb Bot", category: "Bunni Bot" },
+    "0x000000ca9c71cdb00bcd795fc43cf1028952310b": { name: "Bunni Arb Bot", category: "Bunni Bot" },
+    "0x5093ef099346ffe58283207e221dada47bfd862a": { name: "MEV Bot (0x5093ef)", category: "MEV Bot" },
+    "0xeeeeee9ec4769a09a76a83c7bc42b185872860ee": { name: "Relay Router", category: "Retail" },
+    "0x2d5805a423d6ce771f06972ad4499f120902631a": { name: "MEV Bot (0x2d5805)", category: "MEV Bot" },
+    "0x0000000071727de22e5e9d8baf0edac6f37da032": { name: "ERC-4337 Entry Point", category: "Retail" },
+    "0xfb33f10738d6e83a049678c1fcb9eb8b78d1417f": { name: "0x MetaTxn Settler", category: "Retail" },
+    "0xacff4cabde48944b89eb652a3b90e7bcef7dddac": { name: "MEV Bot (0xacff4c)", category: "MEV Bot" },
+    "0x9008d19f58aabd9ed0d60971565aa8510560ab41": { name: "CowSwap", category: "Retail" },
+    "0x5c9bdc801a600c006c388fc032dcb27355154cc9": { name: "0x Settler", category: "Retail" },
+    "0x663dc15d3c1ac63ff12e45ab68fea3f0a883c251": { name: "deBridge", category: "Retail" },
+    "0xf1ceb16d94083606db7f4d98400554f17125483b": { name: "MEV Bot (0xf1ceb1)", category: "MEV Bot" },
+    "0xaaaaaaae92cc1ceef79a038017889fdd26d23d4d": { name: "Relay Approval Proxy", category: "Retail" },
+    "0x00000000009726632680fb29d3f7a9734e3010e2": { name: "Rainbow Router", category: "Retail" },
+    "0x3a23f943181408eac424116af7b7790c94cb97a5": { name: "Socket Gateway", category: "Retail" },
+    "0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae": { name: "LiFi Diamond", category: "Retail" },
+    "0x5ff137d4b0fdcd49dca30c7cf57e578a026d2789": { name: "ERC-4337 EntryPoint", category: "Retail" },
+    "0xd7f1dd5d49206349cae8b585fcb0ce3d96f1696f": { name: "Zerion Router", category: "Retail" },
+    "0x7ae782dcb73d02b0510e9bdb5d5720b5c493dcbd": { name: "UniswapX Filler (0x7ae782)", category: "Retail" },
+    "0x926cf2166e091c8617d8037431a9c572186f18db": { name: "MEV Bot (0x926cf2)", category: "MEV Bot" },
+    "0xc254681c78bd154306954ebd5e8b38e43e3c83b7": { name: "MEV Bot (0xc25468)", category: "MEV Bot" },
+    "0xa20ecbc821fb54064aa7b5c6ac81173b8b34df71": { name: "Metamask Bridge", category: "Retail" },
+    "0xa6a147946facac9e0b99824870b36088764f969f": { name: "Maestro Router", category: "Retail" },
+    "0xf9d64d54d32ee2bdceaabfa60c4c438e224427d0": { name: "Gelato", category: "Retail" },
+    "0xec67ad9721f3856ec8c474032fd722122f91fdb8": { name: "Definitive Vault", category: "Retail" },
+    "0x9307a1e9b667daa65c3ec808d16a696a70076584": { name: "Definitive Vault", category: "Retail" },
+    "0x3fcf39eca3a6277f9d7c4aa6764c89e325135da8": { name: "Definitive Vault", category: "Retail" },
+    "0x26b5f10ce933cbdfed0f06fbed77df31c4a17fa7": { name: "Definitive Vault", category: "Retail" },
+    "0x144c34673f20e755572f26bf4ea8915120d168e4": { name: "Definitive Vault", category: "Retail" },
+    "0x11404175a8e87cc682aa905de165e70d25ad979a": { name: "Definitive Vault", category: "Retail" },
+    "0xbdf03b77d06fc4e1b02ebde6ad565e3a171700b8": { name: "Definitive Vault", category: "Retail" },
+    "0x08c8315549f059ab63e95d0c70770582e2fa80cb": { name: "Definitive Vault", category: "Retail" },
+    "0xb2d09700058e2b972da337cd12aab1a2650cfa2e": { name: "Definitive Vault", category: "Retail" },
+    "0x870eb3264e81edbea04c83758b4a9d15149248d6": { name: "Definitive Vault", category: "Retail" },
+    "0x3df3fa92258660b4988bba76505e9560d54cd555": { name: "Definitive Vault", category: "Retail" },
+    "0x2adfb8257dde3be07204f0020761f70bfb13985a": { name: "Definitive Vault", category: "Retail" },
+    "0xdd3bd9a7811bf236c460fd1b32da6c59c7f2c63c": { name: "Definitive Vault", category: "Retail" },
+    "0x046d1ceb830f3545438e12f0e1b45b8ab4f200f2": { name: "Definitive Vault", category: "Retail" },
+    "0x8bbcc8d79d6a18b1fc3f957911235c115a72c4c8": { name: "Definitive Vault", category: "Retail" },
+    "0xaa8fc25fda37281f07ebb013030ad5070597e54d": { name: "Definitive Vault", category: "Retail" },
+    "0x82d3a471943ff652ddb46375081de04848d2fcd4": { name: "Definitive Vault", category: "Retail" },
+    "0xb60f149981b3510d67e894d3175f90b979dcde7e": { name: "Definitive Vault", category: "Retail" },
+}
