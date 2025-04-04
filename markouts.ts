@@ -381,8 +381,7 @@ async function getPrices(token0: string, token1: string, timestamps: number[]): 
 // Group swaps by day and calculate daily balance changes with fees data
 function calculateDailySwapChanges(
     swaps: Swap[],
-    snapshots: PoolDaySnapshot[],
-    pool: Pool
+    snapshots: PoolDaySnapshot[]
 ): DailySwapChange[] {
     console.log('\nGrouping swaps by day and calculating changes...');
 
@@ -421,21 +420,24 @@ function calculateDailySwapChanges(
         const isZeroForOne = swap.zeroForOne; // true if selling token0 for token1
 
         // For consistent calculation:
-        // - token0 balance increases when someone sells token1 for token0 (delta0 positive)
-        // - token1 balance increases when someone sells token0 for token1 (delta1 positive)
+        // - token0 balance increases when someone sells token0 for token1 (delta0 positive)
+        // - token1 balance increases when someone sells token1 for token0 (delta1 positive)
         if (isZeroForOne) {
-            // Selling token0 for token1
-            day.delta0 = day.delta0.minus(new BigNumber(swap.inputAmount));
-            day.delta1 = day.delta1.plus(new BigNumber(swap.outputAmount));
+            // Swapper selling token0 for token1
+            // Pool got token0 and lost token1
+            day.delta0 = day.delta0.plus(new BigNumber(swap.inputAmount));
+            day.delta1 = day.delta1.minus(new BigNumber(swap.outputAmount));
         } else {
-            // Selling token1 for token0
-            day.delta0 = day.delta0.plus(new BigNumber(swap.outputAmount));
-            day.delta1 = day.delta1.minus(new BigNumber(swap.inputAmount));
+            // Swapper selling token1 for token0
+            // Pool got token1 and lost token0
+            day.delta0 = day.delta0.minus(new BigNumber(swap.outputAmount));
+            day.delta1 = day.delta1.plus(new BigNumber(swap.inputAmount));
         }
     });
 
     // Convert to array and sort by timestamp
-    return Object.values(dailyChanges).sort((a, b) => a.timestamp - b.timestamp);
+    // Remove last entry since day is incomplete
+    return Object.values(dailyChanges).sort((a, b) => a.timestamp - b.timestamp).slice(0, -1);
 }
 
 // Print markout results with fee data
@@ -534,7 +536,7 @@ async function calculateMarkouts(poolId: string): Promise<void> {
         const snapshots = await getPoolDaySnapshots(poolId);
 
         // Calculate daily swap-based changes
-        const dailyChanges = calculateDailySwapChanges(swaps, snapshots, pool);
+        const dailyChanges = calculateDailySwapChanges(swaps, snapshots);
 
         // Show first few swaps in debug mode
         if (debug && swaps.length > 0) {
@@ -557,7 +559,9 @@ async function calculateMarkouts(poolId: string): Promise<void> {
         }
 
         // Get all days we need prices for
-        const dayTimestamps = dailyChanges.map(day => day.timestamp);
+        // Need to offset by 24 hours to get EOD prices
+        const dayInSeconds = 86400;
+        const dayTimestamps = dailyChanges.map(day => day.timestamp + dayInSeconds);
 
         // Get prices for all days
         const prices = await getPrices(
@@ -575,7 +579,8 @@ async function calculateMarkouts(poolId: string): Promise<void> {
         let cumulativeTotalMarkout = new BigNumber(0);
 
         for (const day of dailyChanges) {
-            const timestamp = day.timestamp;
+            // Offset by 24 hours to get EOD prices
+            const timestamp = day.timestamp + dayInSeconds;
 
             const delta0 = day.delta0;
             const delta1 = day.delta1;
