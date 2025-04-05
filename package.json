@@ -9,6 +9,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "asciichart": "^1.5.25",
     "bignumber.js": "^9.1.2",
     "chalk": "^5.4.1",
     "graphql-request": "^7.1.2"

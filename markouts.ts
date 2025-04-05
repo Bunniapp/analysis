@@ -2,6 +2,7 @@ import { request, gql } from 'graphql-request';
 import { BigNumber } from 'bignumber.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import asciichart from 'asciichart';
 
 interface Currency {
     id: string;
@@ -479,6 +480,9 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
         );
     });
 
+    // Add charts after the table
+    displayCharts(markouts);
+
     // Summary
     const lastMarkout = markouts[markouts.length - 1];
     console.log('\nSummary:');
@@ -487,6 +491,31 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     console.log(`Final cumulative markout: $${lastMarkout.cumulative}`);
     console.log(`Final cumulative swap fees: $${lastMarkout.cumulativeSwapFees}`);
     console.log(`Total (Markout + Fees): $${lastMarkout.cumulativeTotalMarkout}`);
+}
+
+// Add this function to generate charts
+function displayCharts(markouts: MarkoutDatapoint[]): void {
+    const config = {
+        height: 20,
+        colors: [
+            asciichart.blue,    // Markouts
+            asciichart.green,   // Fees
+            asciichart.magenta  // Total
+        ],
+    };
+
+    // Prepare data series
+    const cumulativeMarkouts = markouts.map(m => parseFloat(m.cumulative));
+    const cumulativeFees = markouts.map(m => parseFloat(m.cumulativeSwapFees));
+    const cumulativeTotal = markouts.map(m => parseFloat(m.cumulativeTotalMarkout));
+
+    // Generate chart
+    console.log('\nCumulative Performance Chart:');
+    console.log('Blue = Markouts, Green = Fees, Magenta = Total (Markouts + Fees)');
+    console.log(asciichart.plot(
+        [cumulativeMarkouts, cumulativeFees, cumulativeTotal],
+        config
+    ));
 }
 
 // Main function
