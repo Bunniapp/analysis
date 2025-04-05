@@ -2,6 +2,8 @@ import { request, gql } from 'graphql-request';
 import { BigNumber } from 'bignumber.js';
 import { LABELS, type Category } from './labels';
 import chalk from 'chalk';
+import * as fs from 'fs';
+import * as path from 'path';
 
 // Configure BigNumber format
 BigNumber.config({ DECIMAL_PLACES: 2 });
@@ -66,11 +68,14 @@ const GET_POOL_INFO = gql`
 
 // Define the GraphQL query for swaps with pagination
 const GET_POOL_SWAPS = gql`
-  query GetPoolSwaps($poolId: ID!, $skip: Int!, $first: Int!) {
+  query GetPoolSwaps($poolId: ID!, $skip: Int!, $first: Int!, $startTime: Int!) {
     swaps(
       first: $first,
       skip: $skip,
-      where: { pool: $poolId },
+      where: { 
+        pool: $poolId,
+        timestamp_gt: $startTime
+      },
       orderBy: timestamp,
       orderDirection: asc
     ) {
@@ -79,6 +84,7 @@ const GET_POOL_SWAPS = gql`
         to
       }
       amountUSD
+      timestamp
     }
   }
 `;
@@ -89,6 +95,7 @@ interface Swap {
         to: string;
     };
     amountUSD: string;
+    timestamp: string;
 }
 
 interface Pool {
@@ -111,6 +118,31 @@ interface RouterStats {
     percentOfPoolVolume: number;
 }
 
+interface CachedVolumeData {
+    poolId: string;
+    network: string;
+    lastTimestamp: string;
+    poolSymbols: {
+        currency0: string;
+        currency1: string;
+    };
+    routerVolumes: {
+        [router: string]: {
+            volumeUSD: string;  // BigNumber serialized
+            swapCount: number;
+        };
+    };
+}
+
+// Cache setup
+const CACHE_DIR = path.join(process.cwd(), '.cache');
+const VOLUMES_CACHE_FILE = path.join(CACHE_DIR, `volumes_${network}_${poolId}.json`);
+
+// Create cache directory if it doesn't exist
+if (!fs.existsSync(CACHE_DIR)) {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+}
+
 async function getPoolInfo(poolId: string): Promise<Pool> {
     const data = await request(endpoint, GET_POOL_INFO, {
         poolId: poolId.toLowerCase()
@@ -123,7 +155,58 @@ async function getPoolInfo(poolId: string): Promise<Pool> {
     return data.pool;
 }
 
-async function getAllSwaps(poolId: string): Promise<Swap[]> {
+function readCache(): CachedVolumeData | null {
+    try {
+        if (fs.existsSync(VOLUMES_CACHE_FILE)) {
+            const fileContent = fs.readFileSync(VOLUMES_CACHE_FILE, 'utf8');
+            const data = JSON.parse(fileContent, (key, value) => {
+                // Convert string representations back to BigNumber where needed
+                if (key === 'volumeUSD') {
+                    return new BigNumber(value);
+                }
+                return value;
+            });
+
+            // Validate cache structure
+            if (
+                typeof data === 'object' &&
+                data !== null &&
+                typeof data.poolId === 'string' &&
+                typeof data.network === 'string' &&
+                typeof data.lastTimestamp === 'string' &&
+                typeof data.poolSymbols === 'object' &&
+                typeof data.poolSymbols.currency0 === 'string' &&
+                typeof data.poolSymbols.currency1 === 'string' &&
+                typeof data.routerVolumes === 'object'
+            ) {
+                return data as CachedVolumeData;
+            }
+
+            console.warn('Cache file format is invalid');
+        }
+    } catch (error) {
+        console.warn(`Warning: Failed to read cache file ${VOLUMES_CACHE_FILE}`, error);
+    }
+    return null;
+}
+
+function writeCache(data: CachedVolumeData): void {
+    try {
+        const serializedData = JSON.stringify(data, (key, value) => {
+            // Convert BigNumber instances to strings for storage
+            if (value instanceof BigNumber) {
+                return value.toString();
+            }
+            return value;
+        }, 2);
+
+        fs.writeFileSync(VOLUMES_CACHE_FILE, serializedData, 'utf8');
+    } catch (error) {
+        console.warn(`Warning: Failed to write cache file ${VOLUMES_CACHE_FILE}`, error);
+    }
+}
+
+async function getAllSwaps(poolId: string, startTime: number): Promise<Swap[]> {
     const pageSize = 1000;
     let skip = 0;
     const allSwaps: Swap[] = [];
@@ -135,7 +218,8 @@ async function getAllSwaps(poolId: string): Promise<Swap[]> {
         const data = await request(endpoint, GET_POOL_SWAPS, {
             poolId: poolId.toLowerCase(),
             skip,
-            first: pageSize
+            first: pageSize,
+            startTime
         });
 
         const swaps: Swap[] = data.swaps;
@@ -159,16 +243,34 @@ async function getRouterStats(poolId: string): Promise<void> {
         console.log(`Fetching data for pool: ${poolId} on ${network}...`);
 
         const pool = await getPoolInfo(poolId);
-        const swaps = await getAllSwaps(poolId);
+        const cachedData = readCache();
 
-        console.log(`\nAnalyzing ${swaps.length} swaps for ${pool.currency0.symbol}/${pool.currency1.symbol} pool`);
-        console.log(`Total pool volume: $${new BigNumber(pool.volumeUSD).toFormat()}`);
+        let routerMap = new Map<string, { volumeUSD: BigNumber, swapCount: number }>();
+        let startTime = 0;
 
-        const routerMap = new Map<string, { volumeUSD: BigNumber, swapCount: number }>();
+        // Initialize from cache if available
+        if (cachedData && cachedData.poolId === poolId && cachedData.network === network) {
+            console.log('Found cached data, fetching only new swaps...');
+            startTime = parseInt(cachedData.lastTimestamp);
 
-        swaps.forEach(swap => {
+            // Initialize router map from cache
+            Object.entries(cachedData.routerVolumes).forEach(([router, data]) => {
+                routerMap.set(router, {
+                    volumeUSD: new BigNumber(data.volumeUSD),
+                    swapCount: data.swapCount
+                });
+            });
+        }
+
+        // Fetch new swaps since last cached timestamp
+        const newSwaps = await getAllSwaps(poolId, startTime);
+        let latestTimestamp = startTime.toString();
+
+        // Process new swaps
+        newSwaps.forEach(swap => {
             const to = swap.transaction.to;
             const amountUSD = new BigNumber(swap.amountUSD);
+            latestTimestamp = swap.timestamp;
 
             if (!routerMap.has(to)) {
                 routerMap.set(to, { volumeUSD: new BigNumber(0), swapCount: 0 });
@@ -179,6 +281,32 @@ async function getRouterStats(poolId: string): Promise<void> {
             routerStats.swapCount++;
         });
 
+        // Prepare data for caching
+        const cacheData: CachedVolumeData = {
+            poolId,
+            network,
+            lastTimestamp: latestTimestamp,
+            poolSymbols: {
+                currency0: pool.currency0.symbol,
+                currency1: pool.currency1.symbol
+            },
+            routerVolumes: Object.fromEntries(
+                Array.from(routerMap.entries()).map(([router, stats]) => [
+                    router,
+                    {
+                        volumeUSD: stats.volumeUSD.toString(),
+                        swapCount: stats.swapCount
+                    }
+                ])
+            )
+        };
+
+        // Write updated data to cache
+        writeCache(cacheData);
+
+        console.log(`\nAnalyzing ${newSwaps.length} new swaps for ${pool.currency0.symbol}/${pool.currency1.symbol} pool`);
+        console.log(`Total pool volume: $${new BigNumber(pool.volumeUSD).toFormat()}`);
+
         const totalVolumeUSD = new BigNumber(pool.volumeUSD);
         const routerStats: RouterStats[] = Array.from(routerMap.entries()).map(([router, stats]) => ({
             router,
@@ -186,7 +314,7 @@ async function getRouterStats(poolId: string): Promise<void> {
             category: LABELS[router.toLowerCase()]?.category,
             volumeUSD: stats.volumeUSD,
             swapCount: stats.swapCount,
-            percentOfPoolVolume: stats.volumeUSD.dividedBy(totalVolumeUSD).multipliedBy(100).toNumber()
+            percentOfPoolVolume: stats.volumeUSD.multipliedBy(100).dividedBy(totalVolumeUSD).toNumber()
         }));
 
         routerStats.sort((a, b) => b.volumeUSD.minus(a.volumeUSD).toNumber());
@@ -242,12 +370,12 @@ async function getRouterStats(poolId: string): Promise<void> {
 
         console.log('\nSummary:');
         console.log(`Total unique routers: ${routerStats.length}`);
-        console.log(`Total swaps analyzed: ${swaps.length}`);
+        console.log(`New swaps analyzed: ${newSwaps.length}`);
 
         console.log('\nVolume by Category:');
         console.log('-'.repeat(60));
         Object.entries(categoryStats).forEach(([category, stats]) => {
-            const percentOfTotal = stats.volumeUSD.dividedBy(totalVolumeUSD).multipliedBy(100);
+            const percentOfTotal = stats.volumeUSD.multipliedBy(100).dividedBy(totalVolumeUSD);
             const line = `${category}: $${stats.volumeUSD.toFormat(2)} (${percentOfTotal.toFixed(2)}%)`;
 
             if (category === 'Retail') {
@@ -260,6 +388,11 @@ async function getRouterStats(poolId: string): Promise<void> {
                 console.log(line);
             }
         });
+
+        if (newSwaps.length > 0) {
+            console.log(`\nCache updated with latest data (${VOLUMES_CACHE_FILE})`);
+            console.log(`Added ${newSwaps.length} new swaps to the analysis`);
+        }
 
     } catch (error) {
         console.error('Error fetching data:', error);
