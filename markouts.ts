@@ -38,19 +38,12 @@ interface CoinsResponse {
     };
 }
 
-interface PoolDaySnapshot {
-    id: string;
-    periodStart: string;
-    swapFeesUSD: string;
-}
-
 interface DailySwapChange {
     timestamp: number;
     date: string;
     delta0: BigNumber;
     delta1: BigNumber;
     swapCount: number;
-    swapFees: BigNumber; // Daily swap fees in USD
 }
 
 interface MarkoutDatapoint {
@@ -62,10 +55,6 @@ interface MarkoutDatapoint {
     price1: BigNumber;
     markout: BigNumber;
     cumulative: string;
-    swapFees: BigNumber; // Daily swap fees
-    cumulativeSwapFees: string; // Cumulative swap fees
-    totalMarkout: BigNumber; // Daily markout + fees
-    cumulativeTotalMarkout: string; // Cumulative markout + fees
 }
 
 interface CachedResults {
@@ -151,12 +140,12 @@ const POOL_QUERY = gql`
   query GetPool($poolId: ID!) {
     pool(id: $poolId) {
       id
-      currency0 { 
-        id 
+      currency0 {
+        id
         symbol
       }
-      currency1 { 
-        id 
+      currency1 {
+        id
         symbol
       }
       creationTimestamp
@@ -182,21 +171,6 @@ const SWAPS_QUERY = gql`
   }
 `;
 
-const POOL_DAY_SNAPSHOTS_QUERY = gql`
-  query GetPoolDaySnapshots($poolId: ID!) {
-    poolDaySnapshots(
-      first: 1000,
-      where: { pool: $poolId },
-      orderBy: periodStart,
-      orderDirection: asc
-    ) {
-      id
-      periodStart
-      swapFeesUSD
-    }
-  }
-`;
-
 // Read cache
 function readCache(): CachedResults | null {
     try {
@@ -205,7 +179,7 @@ function readCache(): CachedResults | null {
             const fileContent = fs.readFileSync(MARKOUTS_CACHE_FILE, 'utf8');
             const data = JSON.parse(fileContent, (key, value) => {
                 if (key === 'delta0' || key === 'delta1' || key === 'price0' || key === 'price1' ||
-                    key === 'markout' || key === 'swapFees' || key === 'totalMarkout') {
+                    key === 'markout') {
                     return new BigNumber(value);
                 }
                 return value;
@@ -230,11 +204,7 @@ function readCache(): CachedResults | null {
                     m.price0 instanceof BigNumber &&
                     m.price1 instanceof BigNumber &&
                     m.markout instanceof BigNumber &&
-                    typeof m.cumulative === 'string' &&
-                    (m.swapFees === undefined || m.swapFees instanceof BigNumber) &&
-                    (m.cumulativeSwapFees === undefined || typeof m.cumulativeSwapFees === 'string') &&
-                    (m.totalMarkout === undefined || m.totalMarkout instanceof BigNumber) &&
-                    (m.cumulativeTotalMarkout === undefined || typeof m.cumulativeTotalMarkout === 'string')
+                    typeof m.cumulative === 'string'
                 ))
             ) {
                 return data as CachedResults;
@@ -310,20 +280,6 @@ async function getAllSwaps(poolId: string): Promise<Swap[]> {
     return swaps;
 }
 
-// Get pool day snapshots
-async function getPoolDaySnapshots(poolId: string): Promise<PoolDaySnapshot[]> {
-    console.log(`Fetching pool day snapshots...`);
-
-    const { poolDaySnapshots } = await request<{ poolDaySnapshots: PoolDaySnapshot[] }>(
-        endpoint,
-        POOL_DAY_SNAPSHOTS_QUERY,
-        { poolId: poolId.toLowerCase() }
-    );
-
-    console.log(`Found ${poolDaySnapshots.length} day snapshots`);
-    return poolDaySnapshots;
-}
-
 // Get token prices
 async function getPrices(token0: string, token1: string, timestamps: number[]): Promise<PriceData> {
     const uniqueTimestamps = [...new Set(timestamps)];
@@ -336,8 +292,8 @@ async function getPrices(token0: string, token1: string, timestamps: number[]): 
 
     console.log(`\nFetching prices for ${uniqueTimestamps.length} unique days...`);
 
-    // Process in batches of 5 to avoid rate limiting
-    const batchSize = 5;
+    // Process in batches of 100 to avoid rate limiting
+    const batchSize = 100;
     for (let i = 0; i < uniqueTimestamps.length; i += batchSize) {
         const batch = uniqueTimestamps.slice(i, i + batchSize);
 
@@ -379,22 +335,13 @@ async function getPrices(token0: string, token1: string, timestamps: number[]): 
     return prices;
 }
 
-// Group swaps by day and calculate daily balance changes with fees data
+// Group swaps by day and calculate daily balance changes
 function calculateDailySwapChanges(
-    swaps: Swap[],
-    snapshots: PoolDaySnapshot[]
+    swaps: Swap[]
 ): DailySwapChange[] {
     console.log('\nGrouping swaps by day and calculating changes...');
 
     const dailyChanges: Record<number, DailySwapChange> = {};
-    const snapshotsByDay: Record<string, string> = {};
-
-    // Create a lookup for snapshots by day (periodStart maps to the day)
-    snapshots.forEach(snapshot => {
-        // Convert timestamp to date string
-        const date = formatDate(parseInt(snapshot.periodStart));
-        snapshotsByDay[date] = snapshot.swapFeesUSD;
-    });
 
     // Process each swap
     swaps.forEach((swap: Swap) => {
@@ -408,8 +355,7 @@ function calculateDailySwapChanges(
                 date: dateStr,
                 delta0: new BigNumber(0),
                 delta1: new BigNumber(0),
-                swapCount: 0,
-                swapFees: new BigNumber(snapshotsByDay[dateStr] || 0)
+                swapCount: 0
             };
         }
 
@@ -441,12 +387,12 @@ function calculateDailySwapChanges(
     return Object.values(dailyChanges).sort((a, b) => a.timestamp - b.timestamp).slice(0, -1);
 }
 
-// Print markout results with fee data
+// Print markout results
 function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, currency1Symbol: string): void {
     if (currency0Symbol === 'Native Currency') currency0Symbol = 'ETH';
 
     console.log('\nDaily Markout Results using EOD price:');
-    console.log('-'.repeat(180)); // Wider to accommodate more columns
+    console.log('-'.repeat(100));
     console.log(
         'Date'.padEnd(12),
         'Swaps'.padEnd(8),
@@ -455,13 +401,9 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
         'Price 0'.padEnd(8),
         'Price 1'.padEnd(8),
         'Daily Markout ($)'.padEnd(15),
-        'Cum Markout ($)'.padEnd(15),
-        'Daily Fees ($)'.padEnd(15),
-        'Cum Fees ($)'.padEnd(15),
-        'Daily M + F ($)'.padEnd(15),
-        'Cum M + F ($)'.padEnd(15)
+        'Cum Markout ($)'.padEnd(15)
     );
-    console.log('-'.repeat(180));
+    console.log('-'.repeat(100));
 
     markouts.forEach(m => {
         console.log(
@@ -472,11 +414,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
             `$${m.price0.toFixed(2)}`.padEnd(10),
             `$${m.price1.toFixed(2)}`.padEnd(10),
             `$${m.markout.toFixed(2)}`.padEnd(15),
-            `$${m.cumulative}`.padEnd(15),
-            `$${m.swapFees.toFixed(2)}`.padEnd(15),
-            `$${m.cumulativeSwapFees}`.padEnd(15),
-            `$${m.totalMarkout.toFixed(2)}`.padEnd(15),
-            `$${m.cumulativeTotalMarkout}`.padEnd(15)
+            `$${m.cumulative}`.padEnd(15)
         );
     });
 
@@ -489,8 +427,6 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     console.log(`Pool: ${currency0Symbol}/${currency1Symbol}`);
     console.log(`Total days with swap activity: ${markouts.length}`);
     console.log(`Final cumulative markout: $${lastMarkout.cumulative}`);
-    console.log(`Final cumulative swap fees: $${lastMarkout.cumulativeSwapFees}`);
-    console.log(`Total (Markout + Fees): $${lastMarkout.cumulativeTotalMarkout}`);
 }
 
 // Add this function to generate charts
@@ -499,21 +435,17 @@ function displayCharts(markouts: MarkoutDatapoint[]): void {
         height: 20,
         colors: [
             asciichart.blue,    // Markouts
-            asciichart.green,   // Fees
-            asciichart.magenta  // Total
         ],
     };
 
     // Prepare data series
     const cumulativeMarkouts = markouts.map(m => parseFloat(m.cumulative));
-    const cumulativeFees = markouts.map(m => parseFloat(m.cumulativeSwapFees));
-    const cumulativeTotal = markouts.map(m => parseFloat(m.cumulativeTotalMarkout));
 
     // Generate chart
     console.log('\nCumulative Performance Chart:');
-    console.log('Blue = Markouts, Green = Fees, Magenta = Total (Markouts + Fees)');
+    console.log('Blue = Markouts');
     console.log(asciichart.plot(
-        [cumulativeMarkouts, cumulativeFees, cumulativeTotal],
+        [cumulativeMarkouts],
         config
     ));
 }
@@ -527,7 +459,7 @@ async function calculateMarkouts(poolId: string): Promise<void> {
         const cachedResults = !forceRefresh ? readCache() : null;
 
         if (cachedResults && cachedResults.poolId === poolId && cachedResults.network === network &&
-            cachedResults.markouts.length > 0 && cachedResults.markouts[0].swapFees !== undefined) {
+            cachedResults.markouts.length > 0) {
             console.log('Using cached markout results');
             displayMarkouts(
                 cachedResults.markouts,
@@ -561,11 +493,8 @@ async function calculateMarkouts(poolId: string): Promise<void> {
             return;
         }
 
-        // Fetch pool day snapshots (for swap fees)
-        const snapshots = await getPoolDaySnapshots(poolId);
-
         // Calculate daily swap-based changes
-        const dailyChanges = calculateDailySwapChanges(swaps, snapshots);
+        const dailyChanges = calculateDailySwapChanges(swaps);
 
         // Show first few swaps in debug mode
         if (debug && swaps.length > 0) {
@@ -583,7 +512,6 @@ async function calculateMarkouts(poolId: string): Promise<void> {
                 console.log(`Day ${i + 1} (${day.date}):`);
                 console.log(`  Raw Delta0: ${day.delta0.toString()}`);
                 console.log(`  Raw Delta1: ${day.delta1.toString()}`);
-                console.log(`  Swap Fees USD: ${day.swapFees.toString()}`);
             });
         }
 
@@ -604,8 +532,6 @@ async function calculateMarkouts(poolId: string): Promise<void> {
 
         const markouts: MarkoutDatapoint[] = [];
         let cumulative = new BigNumber(0);
-        let cumulativeSwapFees = new BigNumber(0);
-        let cumulativeTotalMarkout = new BigNumber(0);
 
         for (const day of dailyChanges) {
             // Offset by 24 hours to get EOD prices
@@ -613,7 +539,6 @@ async function calculateMarkouts(poolId: string): Promise<void> {
 
             const delta0 = day.delta0;
             const delta1 = day.delta1;
-            const swapFees = day.swapFees;
 
             // Get prices
             const price0 = new BigNumber(prices[pool.currency0.id][timestamp] || 0);
@@ -623,13 +548,6 @@ async function calculateMarkouts(poolId: string): Promise<void> {
             const dailyMarkout = delta0.times(price0).plus(delta1.times(price1));
             cumulative = cumulative.plus(dailyMarkout);
 
-            // Update swap fee cumulative total
-            cumulativeSwapFees = cumulativeSwapFees.plus(swapFees);
-
-            // Calculate total (markout + fees)
-            const totalMarkout = dailyMarkout.plus(swapFees);
-            cumulativeTotalMarkout = cumulativeTotalMarkout.plus(totalMarkout);
-
             markouts.push({
                 date: day.date,
                 swapCount: day.swapCount,
@@ -638,11 +556,7 @@ async function calculateMarkouts(poolId: string): Promise<void> {
                 price0,
                 price1,
                 markout: dailyMarkout,
-                cumulative: cumulative.toFixed(2),
-                swapFees,
-                cumulativeSwapFees: cumulativeSwapFees.toFixed(2),
-                totalMarkout,
-                cumulativeTotalMarkout: cumulativeTotalMarkout.toFixed(2)
+                cumulative: cumulative.toFixed(2)
             });
         }
 
