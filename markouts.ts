@@ -22,6 +22,12 @@ interface Swap {
     zeroForOne: boolean;
     inputAmount: string;
     outputAmount: string;
+    rawBalance0: string;
+    rawBalance1: string;
+    reserve0: string;
+    reserve1: string;
+    pricePerVaultShare0: string;
+    pricePerVaultShare1: string;
 }
 
 interface PriceData {
@@ -30,20 +36,17 @@ interface PriceData {
     };
 }
 
-interface CoinsResponse {
+interface BatchHistoricalResponse {
     coins: {
         [key: string]: {
-            price: number;
+            symbol: string;
+            prices: Array<{
+                timestamp: number;
+                price: number;
+                confidence?: number;
+            }>;
         };
     };
-}
-
-interface DailySwapChange {
-    timestamp: number;
-    date: string;
-    delta0: BigNumber;
-    delta1: BigNumber;
-    swapCount: number;
 }
 
 interface MarkoutDatapoint {
@@ -54,7 +57,9 @@ interface MarkoutDatapoint {
     price0: BigNumber;
     price1: BigNumber;
     markout: BigNumber;
-    cumulative: string;
+    cumulative: BigNumber;
+    tvlAdjustedMarkout: BigNumber; // Daily TVL-adjusted markout
+    cumulativeTvlAdjusted: BigNumber; // Cumulative TVL-adjusted markout
 }
 
 interface CachedResults {
@@ -65,14 +70,19 @@ interface CachedResults {
         currency1: string;
     };
     swapCount: number;
+    lastTimestamp: string; // Last processed swap timestamp
     markouts: MarkoutDatapoint[];
+    prices?: {
+        token0Id: string;
+        token1Id: string;
+        data: PriceData;
+    };
 }
 
 // Parse command line arguments
 const args = process.argv.slice(2);
 let poolId = '';
 let network = 'mainnet';
-let forceRefresh = false;
 let debug = false;
 
 for (let i = 0; i < args.length; i++) {
@@ -82,18 +92,15 @@ for (let i = 0; i < args.length; i++) {
     } else if ((args[i] === '--network' || args[i] === '-n') && i + 1 < args.length) {
         network = args[i + 1];
         i++;
-    } else if (args[i] === '--refresh' || args[i] === '-r') {
-        forceRefresh = true;
     } else if (args[i] === '--debug' || args[i] === '-d') {
         debug = true;
     } else if (args[i] === '--help' || args[i] === '-h') {
         console.log(`
-Usage: bun run markout.ts --pool <poolId> [--network <network>] [--refresh] [--debug]
+Usage: bun run markout.ts --pool <poolId> [--network <network>] [--debug]
 
 Options:
   --pool, -p     Pool ID (address)
   --network, -n  Network to query (default: mainnet)
-  --refresh, -r  Force refresh cache
   --debug, -d    Show debug information
   --help, -h     Show help
     `);
@@ -154,11 +161,15 @@ const POOL_QUERY = gql`
 `;
 
 const SWAPS_QUERY = gql`
-  query GetSwaps($poolId: ID!, $skip: Int!) {
+  query GetSwaps($poolId: ID!, $skip: Int!, $startTime: Int!, $endTime: Int!) {
     swaps(
       first: 1000,
       skip: $skip,
-      where: { pool: $poolId },
+      where: {
+        pool: $poolId,
+        timestamp_gt: $startTime,
+        timestamp_lt: $endTime
+      },
       orderBy: timestamp,
       orderDirection: asc
     ) {
@@ -167,6 +178,12 @@ const SWAPS_QUERY = gql`
       zeroForOne
       inputAmount
       outputAmount
+      rawBalance0
+      rawBalance1
+      reserve0
+      reserve1
+      pricePerVaultShare0
+      pricePerVaultShare1
     }
   }
 `;
@@ -179,7 +196,8 @@ function readCache(): CachedResults | null {
             const fileContent = fs.readFileSync(MARKOUTS_CACHE_FILE, 'utf8');
             const data = JSON.parse(fileContent, (key, value) => {
                 if (key === 'delta0' || key === 'delta1' || key === 'price0' || key === 'price1' ||
-                    key === 'markout') {
+                    key === 'markout' || key === 'cumulative' || key === 'tvlAdjustedMarkout' ||
+                    key === 'cumulativeTvlAdjusted') {
                     return new BigNumber(value);
                 }
                 return value;
@@ -195,6 +213,8 @@ function readCache(): CachedResults | null {
                 typeof data.poolSymbols.currency0 === 'string' &&
                 typeof data.poolSymbols.currency1 === 'string' &&
                 typeof data.swapCount === 'number' &&
+                // Check for lastTimestamp (might be missing in older cache files)
+                (data.lastTimestamp === undefined || typeof data.lastTimestamp === 'string') &&
                 Array.isArray(data.markouts) &&
                 data.markouts.every((m: any) => (
                     typeof m.date === 'string' &&
@@ -204,8 +224,16 @@ function readCache(): CachedResults | null {
                     m.price0 instanceof BigNumber &&
                     m.price1 instanceof BigNumber &&
                     m.markout instanceof BigNumber &&
-                    typeof m.cumulative === 'string'
-                ))
+                    m.cumulative instanceof BigNumber &&
+                    (m.tvlAdjustedMarkout === undefined || m.tvlAdjustedMarkout instanceof BigNumber) &&
+                    (m.cumulativeTvlAdjusted === undefined || m.cumulativeTvlAdjusted instanceof BigNumber)
+                )) &&
+                // Validate prices structure if it exists
+                (data.prices === undefined ||
+                    (typeof data.prices === 'object' &&
+                        typeof data.prices.token0Id === 'string' &&
+                        typeof data.prices.token1Id === 'string' &&
+                        typeof data.prices.data === 'object'))
             ) {
                 return data as CachedResults;
             }
@@ -237,9 +265,23 @@ function formatDate(timestamp: number): string {
 
 // Get day timestamp from full timestamp (start of day)
 function getDayTimestamp(timestamp: number): number {
-    const date = new Date(timestamp * 1000);
-    date.setUTCHours(0, 0, 0, 0);
-    return Math.floor(date.getTime() / 1000);
+    return Math.floor(timestamp / 86400) * 86400;
+}
+
+// Find the closest timestamp divisible by 86400 (start of day)
+function findClosestDayTimestamp(timestamp: number): number {
+    const dayInSeconds = 86400;
+    // Get the day timestamp (start of day)
+    const dayStart = getDayTimestamp(timestamp);
+    // Get the next day timestamp
+    const nextDayStart = dayStart + dayInSeconds;
+
+    // Determine which is closer: start of day or start of next day
+    if (timestamp - dayStart < nextDayStart - timestamp) {
+        return dayStart; // Closer to start of day
+    } else {
+        return nextDayStart; // Closer to start of next day
+    }
 }
 
 // Get pool info
@@ -255,17 +297,22 @@ async function getPoolInfo(poolId: string): Promise<Pool> {
     return pool;
 }
 
-// Get all swaps for a pool
-async function getAllSwaps(poolId: string): Promise<Swap[]> {
-    console.log(`Fetching swaps...`);
+// Get all swaps for a pool, starting from a specific timestamp
+async function getAllSwaps(poolId: string, startTime: number = 0): Promise<Swap[]> {
+    console.log(`Fetching swaps from timestamp ${startTime}...`);
 
     const swaps: Swap[] = [];
     let skip = 0;
 
+    const endTime = Math.floor(Date.now() / 1000 / 86400) * 86400; // don't need today's data
+    console.log(`Fetching swaps until timestamp ${endTime}...`);
+
     while (true) {
         const data = await request<{ swaps: Swap[] }>(endpoint, SWAPS_QUERY, {
             poolId: poolId.toLowerCase(),
-            skip
+            skip,
+            startTime,
+            endTime
         });
 
         const batch = data.swaps;
@@ -276,11 +323,11 @@ async function getAllSwaps(poolId: string): Promise<Swap[]> {
         process.stdout.write(`\rFetched ${swaps.length} swaps...`);
     }
 
-    console.log(`\nFound ${swaps.length} swaps`);
+    console.log(`\nFound ${swaps.length} swaps since timestamp ${startTime}`);
     return swaps;
 }
 
-// Get token prices
+// Get token prices using the batchHistorical endpoint with batching to avoid URL length limits
 async function getPrices(token0: string, token1: string, timestamps: number[]): Promise<PriceData> {
     const uniqueTimestamps = [...new Set(timestamps)];
 
@@ -290,77 +337,155 @@ async function getPrices(token0: string, token1: string, timestamps: number[]): 
         [token1]: {}
     };
 
-    console.log(`\nFetching prices for ${uniqueTimestamps.length} unique days...`);
+    console.log(`\nFetching prices for ${uniqueTimestamps.length} unique timestamps using batchHistorical endpoint...`);
 
-    // Process in batches of 100 to avoid rate limiting
-    const batchSize = 100;
-    for (let i = 0; i < uniqueTimestamps.length; i += batchSize) {
-        const batch = uniqueTimestamps.slice(i, i + batchSize);
+    // Batch size for timestamps to avoid URL length limits
+    // A smaller batch size helps prevent HTTP 414 errors (URI Too Long)
+    const BATCH_SIZE = 100; // Adjust this value if needed
 
-        await Promise.all(batch.map(async (timestamp: number) => {
-            try {
-                // Fetch prices for both tokens in a single request
-                const coins = `${chainName}:${token0},${chainName}:${token1}`;
-                const url = process.env.DEFILLAMA_API_KEY
-                    ? `https://pro-api.llama.fi/${process.env.DEFILLAMA_API_KEY}/coins/prices/historical/${timestamp}/${coins}`
-                    : `https://coins.llama.fi/prices/historical/${timestamp}/${coins}`;
+    // Process timestamps in batches
+    for (let i = 0; i < uniqueTimestamps.length; i += BATCH_SIZE) {
+        const timestampBatch = uniqueTimestamps.slice(i, i + BATCH_SIZE);
 
-                const response = await fetch(url);
-                if (!response.ok) throw new Error(`API error: ${response.status}`);
+        process.stdout.write(`\rFetching batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(uniqueTimestamps.length / BATCH_SIZE)}...`);
 
-                const data = await response.json() as CoinsResponse;
+        try {
+            // Create the coins object for the batchHistorical endpoint
+            const coinsObj: Record<string, number[]> = {
+                [`${chainName}:${token0}`]: timestampBatch,
+                [`${chainName}:${token1}`]: timestampBatch
+            };
 
-                // Store prices
-                const coin0Key = `${chainName}:${token0}`;
-                const coin1Key = `${chainName}:${token1}`;
+            // Convert to JSON string for the query parameter
+            const coinsParam = JSON.stringify(coinsObj);
 
-                prices[token0][timestamp] = (data.coins[coin0Key]?.price) || 0;
-                prices[token1][timestamp] = (data.coins[coin1Key]?.price) || 0;
-            } catch (error) {
-                console.error(`Error fetching prices at ${timestamp}: ${(error as Error).message}`);
-                prices[token0][timestamp] = 0;
-                prices[token1][timestamp] = 0;
+            // Construct the URL
+            const baseUrl = process.env.DEFILLAMA_API_KEY
+                ? `https://pro-api.llama.fi/${process.env.DEFILLAMA_API_KEY}/coins/batchHistorical`
+                : `https://coins.llama.fi/coins/batchHistorical`;
+
+            const url = new URL(baseUrl);
+            url.searchParams.append('coins', coinsParam);
+            url.searchParams.append('searchWidth', '6h'); // Default search width
+
+            // Make an API call for this batch of timestamps
+            const response = await fetch(url.toString());
+            if (!response.ok) throw new Error(`API error: ${response.status} - ${await response.text()}`);
+
+            const data = await response.json() as BatchHistoricalResponse;
+
+            // Process the response
+            const coin0Key = `${chainName}:${token0}`;
+            const coin1Key = `${chainName}:${token1}`;
+
+            if (data.coins[coin0Key]) {
+                data.coins[coin0Key].prices.forEach((priceData: { timestamp: number; price: number }) => {
+                    // Find the closest timestamp divisible by 86400 (start of day)
+                    const dayTimestamp = findClosestDayTimestamp(priceData.timestamp);
+                    // Store all prices for the current session (zero or not)
+                    prices[token0][dayTimestamp] = priceData.price || 0;
+                });
             }
-        }));
 
-        process.stdout.write(`\rProcessed ${Math.min((i + batchSize), uniqueTimestamps.length)}/${uniqueTimestamps.length} days...`);
+            if (data.coins[coin1Key]) {
+                data.coins[coin1Key].prices.forEach((priceData: { timestamp: number; price: number }) => {
+                    // Find the closest timestamp divisible by 86400 (start of day)
+                    const dayTimestamp = findClosestDayTimestamp(priceData.timestamp);
+                    // Store all prices for the current session (zero or not)
+                    prices[token1][dayTimestamp] = priceData.price || 0;
+                });
+            }
 
-        // Small delay to avoid rate limiting
-        if (i + batchSize < uniqueTimestamps.length) {
-            await new Promise(resolve => setTimeout(resolve, 500));
+            // Small delay to avoid rate limiting
+            if (i + BATCH_SIZE < uniqueTimestamps.length) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        } catch (error) {
+            console.error(`\nError fetching batch prices (batch ${Math.floor(i / BATCH_SIZE) + 1}): ${(error as Error).message}`);
+            // Set timestamps in this batch to 0 for the current session
+            timestampBatch.forEach(timestamp => {
+                // Find the closest day timestamp
+                const dayTimestamp = findClosestDayTimestamp(timestamp);
+                // Only set to 0 if not already in the prices object (to avoid overwriting valid cached prices)
+                if (prices[token0][dayTimestamp] === undefined) {
+                    prices[token0][dayTimestamp] = 0;
+                }
+                if (prices[token1][dayTimestamp] === undefined) {
+                    prices[token1][dayTimestamp] = 0;
+                }
+            });
         }
+    }
+
+    // Check if we got all the timestamps (using closest day timestamps)
+    const missingTimestamps0 = uniqueTimestamps.filter(ts => {
+        const dayTimestamp = findClosestDayTimestamp(ts);
+        return prices[token0][dayTimestamp] === undefined;
+    });
+    const missingTimestamps1 = uniqueTimestamps.filter(ts => {
+        const dayTimestamp = findClosestDayTimestamp(ts);
+        return prices[token1][dayTimestamp] === undefined;
+    });
+
+    if (missingTimestamps0.length > 0 || missingTimestamps1.length > 0) {
+        console.log(`\nWarning: Missing prices for some timestamps:`);
+        console.log(`  Token0 (${token0}): ${missingTimestamps0.length} missing timestamps`);
+        console.log(`  Token1 (${token1}): ${missingTimestamps1.length} missing timestamps`);
+
+        // Set missing timestamps to 0 for the current session
+        missingTimestamps0.forEach(ts => {
+            // Find the closest day timestamp
+            const dayTimestamp = findClosestDayTimestamp(ts);
+            prices[token0][dayTimestamp] = 0;
+        });
+        missingTimestamps1.forEach(ts => {
+            // Find the closest day timestamp
+            const dayTimestamp = findClosestDayTimestamp(ts);
+            prices[token1][dayTimestamp] = 0;
+        });
     }
 
     console.log('\nPrice data fetched');
     return prices;
 }
 
-// Group swaps by day and calculate daily balance changes
-function calculateDailySwapChanges(
-    swaps: Swap[]
-): DailySwapChange[] {
-    console.log('\nGrouping swaps by day and calculating changes...');
+// Process swaps and calculate markouts in a single pass
+function processSwapsAndCalculateMarkouts(
+    swaps: Swap[],
+    pool: Pool,
+    prices: PriceData
+): MarkoutDatapoint[] {
+    console.log('\nProcessing swaps and calculating markouts...');
 
-    const dailyChanges: Record<number, DailySwapChange> = {};
+    const dayInSeconds = 86400;
+    const dailyData: Record<number, {
+        date: string,
+        swapCount: number,
+        delta0: BigNumber,
+        delta1: BigNumber,
+        tvlAdjustedMarkout: BigNumber
+    }> = {};
 
-    // Process each swap
+    // Process each swap and group by day
     swaps.forEach((swap: Swap) => {
-        const dayTs = getDayTimestamp(parseInt(swap.timestamp));
+        const swapTimestamp = parseInt(swap.timestamp);
+        const dayTs = getDayTimestamp(swapTimestamp);
         const dateStr = formatDate(dayTs);
+        const eodTimestamp = dayTs + dayInSeconds; // End of day timestamp
 
         // Initialize day if not exists
-        if (!dailyChanges[dayTs]) {
-            dailyChanges[dayTs] = {
-                timestamp: dayTs,
+        if (!dailyData[dayTs]) {
+            dailyData[dayTs] = {
                 date: dateStr,
+                swapCount: 0,
                 delta0: new BigNumber(0),
                 delta1: new BigNumber(0),
-                swapCount: 0
+                tvlAdjustedMarkout: new BigNumber(0)
             };
         }
 
         // Update day metrics
-        const day = dailyChanges[dayTs];
+        const day = dailyData[dayTs];
         day.swapCount++;
 
         // Calculate delta based on swap direction
@@ -380,11 +505,95 @@ function calculateDailySwapChanges(
             day.delta0 = day.delta0.minus(new BigNumber(swap.outputAmount));
             day.delta1 = day.delta1.plus(new BigNumber(swap.inputAmount));
         }
+
+        // Calculate TVL and TVL-adjusted markout for this swap
+        try {
+            // Get token prices at the end of the day (EOD)
+            const price0EODUSD = new BigNumber(prices[pool.currency0.id][eodTimestamp] || 0);
+            const price1EODUSD = new BigNumber(prices[pool.currency1.id][eodTimestamp] || 0);
+
+            if (price0EODUSD.isGreaterThan(0) && price1EODUSD.isGreaterThan(0)) {
+                // Calculate TVL using the formula with EOD prices:
+                // TVL = (rawBalance0 + reserve0 * pricePerVaultShare0) * price0USD +
+                //       (rawBalance1 + reserve1 * pricePerVaultShare1) * price1USD
+                const rawBalance0 = new BigNumber(swap.rawBalance0);
+                const rawBalance1 = new BigNumber(swap.rawBalance1);
+                const reserve0 = new BigNumber(swap.reserve0);
+                const reserve1 = new BigNumber(swap.reserve1);
+                const pricePerVaultShare0 = new BigNumber(swap.pricePerVaultShare0);
+                const pricePerVaultShare1 = new BigNumber(swap.pricePerVaultShare1);
+
+                const token0Value = rawBalance0.plus(reserve0.times(pricePerVaultShare0)).times(price0EODUSD);
+                const token1Value = rawBalance1.plus(reserve1.times(pricePerVaultShare1)).times(price1EODUSD);
+                const tvl = token0Value.plus(token1Value);
+
+                // Calculate markout for this specific swap using EOD prices
+                let swapDelta0;
+                let swapDelta1;
+
+                if (isZeroForOne) {
+                    swapDelta0 = new BigNumber(swap.inputAmount);
+                    swapDelta1 = new BigNumber(swap.outputAmount).negated();
+                } else {
+                    swapDelta0 = new BigNumber(swap.outputAmount).negated();
+                    swapDelta1 = new BigNumber(swap.inputAmount);
+                }
+
+                // Use EOD prices for markout calculation
+                const swapMarkout = swapDelta0.times(price0EODUSD).plus(swapDelta1.times(price1EODUSD));
+
+                // Calculate TVL-adjusted markout (markout / tvl) and accumulate
+                if (tvl.isGreaterThan(0)) {
+                    const tvlAdjustedMarkoutForSwap = swapMarkout.dividedBy(tvl);
+                    day.tvlAdjustedMarkout = day.tvlAdjustedMarkout.plus(tvlAdjustedMarkoutForSwap);
+                }
+            }
+        } catch (error) {
+            console.warn(`Warning: Could not calculate TVL for swap ${swap.id}: ${(error as Error).message}`);
+        }
     });
 
-    // Convert to array and sort by timestamp
-    // Remove last entry since day is incomplete
-    return Object.values(dailyChanges).sort((a, b) => a.timestamp - b.timestamp).slice(0, -1);
+    // Convert daily data to array and sort by timestamp
+    const dailyChanges = Object.entries(dailyData)
+        .map(([timestamp, data]) => ({ timestamp: parseInt(timestamp), ...data }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+
+    // Calculate markouts and cumulative values
+    const markouts: MarkoutDatapoint[] = [];
+    let cumulative = new BigNumber(0);
+    let cumulativeTvlAdjusted = new BigNumber(0);
+
+    for (const day of dailyChanges) {
+        // Get EOD timestamp
+        const eodTimestamp = day.timestamp + dayInSeconds;
+
+        // Get EOD prices
+        const price0 = new BigNumber(prices[pool.currency0.id][eodTimestamp] || 0);
+        const price1 = new BigNumber(prices[pool.currency1.id][eodTimestamp] || 0);
+
+        // Calculate daily markout using EOD prices
+        const dailyMarkout = day.delta0.times(price0).plus(day.delta1.times(price1));
+
+        // Update cumulative values
+        cumulative = cumulative.plus(dailyMarkout);
+        cumulativeTvlAdjusted = cumulativeTvlAdjusted.plus(day.tvlAdjustedMarkout);
+
+        // Create markout datapoint
+        markouts.push({
+            date: day.date,
+            swapCount: day.swapCount,
+            delta0: day.delta0,
+            delta1: day.delta1,
+            price0,
+            price1,
+            markout: dailyMarkout,
+            cumulative,
+            tvlAdjustedMarkout: day.tvlAdjustedMarkout,
+            cumulativeTvlAdjusted
+        });
+    }
+
+    return markouts;
 }
 
 // Print markout results
@@ -392,7 +601,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     if (currency0Symbol === 'Native Currency') currency0Symbol = 'ETH';
 
     console.log('\nDaily Markout Results using EOD price:');
-    console.log('-'.repeat(100));
+    console.log('-'.repeat(140)); // Wider to accommodate TVL-adjusted columns
     console.log(
         'Date'.padEnd(12),
         'Swaps'.padEnd(8),
@@ -401,9 +610,11 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
         'Price 0'.padEnd(8),
         'Price 1'.padEnd(8),
         'Daily Markout ($)'.padEnd(15),
-        'Cum Markout ($)'.padEnd(15)
+        'Cum Markout ($)'.padEnd(15),
+        'TVL-Adj Markout'.padEnd(15),
+        'Cum TVL-Adj Markout'.padEnd(15)
     );
-    console.log('-'.repeat(100));
+    console.log('-'.repeat(140));
 
     markouts.forEach(m => {
         console.log(
@@ -414,7 +625,9 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
             `$${m.price0.toFixed(2)}`.padEnd(10),
             `$${m.price1.toFixed(2)}`.padEnd(10),
             `$${m.markout.toFixed(2)}`.padEnd(15),
-            `$${m.cumulative}`.padEnd(15)
+            `$${m.cumulative.toFixed(2)}`.padEnd(15),
+            `${m.tvlAdjustedMarkout.times(100).toFixed(6)}%`.padEnd(15),
+            `${m.cumulativeTvlAdjusted.times(100).toFixed(6)}%`.padEnd(15)
         );
     });
 
@@ -426,28 +639,35 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     console.log('\nSummary:');
     console.log(`Pool: ${currency0Symbol}/${currency1Symbol}`);
     console.log(`Total days with swap activity: ${markouts.length}`);
-    console.log(`Final cumulative markout: $${lastMarkout.cumulative}`);
+    console.log(`Final cumulative markout: $${lastMarkout.cumulative.toFixed(2)}`);
+    console.log(`Final cumulative TVL-adjusted markout: ${lastMarkout.cumulativeTvlAdjusted.times(100).toFixed(6)}%`);
 }
 
 // Add this function to generate charts
 function displayCharts(markouts: MarkoutDatapoint[]): void {
-    const config = {
+    // Prepare data series
+    const cumulativeMarkouts = markouts.map(m => m.cumulative.toNumber());
+    const cumulativeTvlAdjusted = markouts.map(m => m.cumulativeTvlAdjusted.times(100).toNumber());
+
+    // Configuration for regular markout chart
+    const markoutConfig = {
         height: 20,
-        colors: [
-            asciichart.blue,    // Markouts
-        ],
+        colors: [asciichart.blue],
     };
 
-    // Prepare data series
-    const cumulativeMarkouts = markouts.map(m => parseFloat(m.cumulative));
+    // Generate regular markout chart
+    console.log('\nCumulative Markout Performance Chart ($):');
+    console.log(asciichart.plot([cumulativeMarkouts], markoutConfig));
 
-    // Generate chart
-    console.log('\nCumulative Performance Chart:');
-    console.log('Blue = Markouts');
-    console.log(asciichart.plot(
-        [cumulativeMarkouts],
-        config
-    ));
+    // Configuration for TVL-adjusted markout chart
+    const tvlAdjustedConfig = {
+        height: 20,
+        colors: [asciichart.green],
+    };
+
+    // Generate TVL-adjusted markout chart
+    console.log('\nCumulative TVL-Adjusted Markout Performance Chart (%):');
+    console.log(asciichart.plot([cumulativeTvlAdjusted], tvlAdjustedConfig));
 }
 
 // Main function
@@ -455,25 +675,28 @@ async function calculateMarkouts(poolId: string): Promise<void> {
     try {
         console.log(`Running markout calculator for pool ${poolId} on ${network}`);
 
-        // Check if we have cached results
-        const cachedResults = !forceRefresh ? readCache() : null;
+        // Read cache to get existing data
+        const cachedResults = readCache();
+        let startTime = 0;
 
-        if (cachedResults && cachedResults.poolId === poolId && cachedResults.network === network &&
-            cachedResults.markouts.length > 0) {
-            console.log('Using cached markout results');
-            displayMarkouts(
-                cachedResults.markouts,
-                cachedResults.poolSymbols.currency0,
-                cachedResults.poolSymbols.currency1
-            );
+        // Check if we have valid cached data for this pool and network
+        const hasCachedData = cachedResults &&
+            cachedResults.poolId === poolId &&
+            cachedResults.network === network;
 
-            console.log(`\nTotal swaps processed: ${cachedResults.swapCount}`);
-            console.log(`Cache file: ${MARKOUTS_CACHE_FILE}`);
-            return;
+        if (hasCachedData) {
+            console.log('Found cached data, will fetch only new swaps...');
+
+            // Get the last processed timestamp to use as our starting point
+            if (cachedResults.lastTimestamp) {
+                startTime = parseInt(cachedResults.lastTimestamp);
+                console.log(`Will fetch swaps after timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+            } else {
+                console.log('No lastTimestamp found in cache, will fetch all swaps');
+            }
+        } else {
+            console.log('No valid cached results found, calculating markouts from scratch');
         }
-
-        // If no cache or force refresh, compute everything
-        console.log('No cached results found, calculating markouts from scratch');
 
         // Fetch pool info
         const pool = await getPoolInfo(poolId);
@@ -485,82 +708,180 @@ async function calculateMarkouts(poolId: string): Promise<void> {
             console.log(`Token 1: ${pool.currency1.symbol} (ID: ${pool.currency1.id})`);
         }
 
-        // Fetch all swaps
-        const swaps = await getAllSwaps(poolId);
+        // Fetch new swaps since the last processed timestamp
+        const newSwaps = await getAllSwaps(poolId, startTime);
 
-        if (swaps.length === 0) {
+        // If no new swaps and no cached data, nothing to do
+        if (newSwaps.length === 0 && !hasCachedData) {
             console.log('No swaps found for this pool.');
             return;
         }
 
-        // Calculate daily swap-based changes
-        const dailyChanges = calculateDailySwapChanges(swaps);
+        // If no new swaps but we have cached data, just display the cached results
+        if (newSwaps.length === 0 && hasCachedData) {
+            console.log('No new swaps found since last update. Using cached markouts.');
+            displayMarkouts(
+                cachedResults.markouts,
+                pool.currency0.symbol,
+                pool.currency1.symbol
+            );
+            console.log(`\nTotal swaps processed: ${cachedResults.swapCount}`);
+            console.log(`Cache file: ${MARKOUTS_CACHE_FILE}`);
+            return;
+        }
+
+        // Get the latest timestamp from the new swaps for caching
+        const latestTimestamp = newSwaps.length > 0 ?
+            newSwaps[newSwaps.length - 1].timestamp :
+            startTime.toString();
+
+        // Calculate total swap count (cached + new)
+        const totalSwapCount = hasCachedData ?
+            cachedResults.swapCount + newSwaps.length :
+            newSwaps.length;
 
         // Show first few swaps in debug mode
-        if (debug && swaps.length > 0) {
+        if (debug && newSwaps.length > 0) {
             console.log(`\nSample Swap Data (First 3):`);
-            swaps.slice(0, 3).forEach((swap, i) => {
+            newSwaps.slice(0, 3).forEach((swap: Swap, i: number) => {
                 console.log(`Swap ${i + 1}:`);
                 console.log(`  Direction: ${swap.zeroForOne ? 'Zero For One' : 'One For Zero'}`);
                 console.log(`  Input Amount: ${swap.inputAmount}`);
                 console.log(`  Output Amount: ${swap.outputAmount}`);
-            });
-
-            // Show raw daily changes
-            console.log(`\nRaw Daily Changes (First 3):`);
-            dailyChanges.slice(0, 3).forEach((day, i) => {
-                console.log(`Day ${i + 1} (${day.date}):`);
-                console.log(`  Raw Delta0: ${day.delta0.toString()}`);
-                console.log(`  Raw Delta1: ${day.delta1.toString()}`);
+                console.log(`  Raw Balance0: ${swap.rawBalance0}`);
+                console.log(`  Raw Balance1: ${swap.rawBalance1}`);
+                console.log(`  Reserve0: ${swap.reserve0}`);
+                console.log(`  Reserve1: ${swap.reserve1}`);
+                console.log(`  PricePerVaultShare0: ${swap.pricePerVaultShare0}`);
+                console.log(`  PricePerVaultShare1: ${swap.pricePerVaultShare1}`);
             });
         }
 
-        // Get all days we need prices for
-        // Need to offset by 24 hours to get EOD prices
+        // Define day in seconds constant
         const dayInSeconds = 86400;
-        const dayTimestamps = dailyChanges.map(day => day.timestamp + dayInSeconds);
 
-        // Get prices for all days
-        const prices = await getPrices(
-            pool.currency0.id,
-            pool.currency1.id,
-            dayTimestamps
-        );
+        // Initialize prices data structure
+        let prices: PriceData = {
+            [pool.currency0.id]: {},
+            [pool.currency1.id]: {}
+        };
 
-        // Calculate markouts
-        console.log('\nCalculating markouts...');
+        // Get all timestamps we need prices for
+        const allTimestamps: number[] = [];
+        newSwaps.forEach((swap: Swap) => {
+            const dayTs = getDayTimestamp(parseInt(swap.timestamp));
+            allTimestamps.push(dayTs + dayInSeconds);
+        });
+        const uniqueTimestamps = [...new Set(allTimestamps)];
 
-        const markouts: MarkoutDatapoint[] = [];
-        let cumulative = new BigNumber(0);
+        // Check if we have cached prices and use them
+        let timestampsToFetch: number[] = uniqueTimestamps;
 
-        for (const day of dailyChanges) {
-            // Offset by 24 hours to get EOD prices
-            const timestamp = day.timestamp + dayInSeconds;
+        if (cachedResults && cachedResults.prices &&
+            cachedResults.prices.token0Id === pool.currency0.id &&
+            cachedResults.prices.token1Id === pool.currency1.id) {
+            console.log('Found cached price data');
 
-            const delta0 = day.delta0;
-            const delta1 = day.delta1;
+            // Copy cached prices to our prices object
+            const cachedPrices = cachedResults.prices.data;
+            prices[pool.currency0.id] = { ...cachedPrices[pool.currency0.id] };
+            prices[pool.currency1.id] = { ...cachedPrices[pool.currency1.id] };
 
-            // Get prices
-            const price0 = new BigNumber(prices[pool.currency0.id][timestamp] || 0);
-            const price1 = new BigNumber(prices[pool.currency1.id][timestamp] || 0);
-
-            // Calculate markout using only swap-related balance changes
-            const dailyMarkout = delta0.times(price0).plus(delta1.times(price1));
-            cumulative = cumulative.plus(dailyMarkout);
-
-            markouts.push({
-                date: day.date,
-                swapCount: day.swapCount,
-                delta0,
-                delta1,
-                price0,
-                price1,
-                markout: dailyMarkout,
-                cumulative: cumulative.toFixed(2)
+            // Filter out timestamps that are already in the cache
+            timestampsToFetch = uniqueTimestamps.filter(timestamp => {
+                const hasToken0Price = prices[pool.currency0.id][timestamp] !== undefined;
+                const hasToken1Price = prices[pool.currency1.id][timestamp] !== undefined;
+                return !(hasToken0Price && hasToken1Price);
             });
+
+            console.log(`Using ${uniqueTimestamps.length - timestampsToFetch.length} cached timestamps, need to fetch ${timestampsToFetch.length} new timestamps`);
         }
 
-        // Cache the final results
+        // Fetch only the timestamps that aren't in the cache
+        if (timestampsToFetch.length > 0) {
+            console.log('Fetching missing price data from DeFiLlama...');
+
+            // Get prices only for timestamps not in cache
+            const newPrices = await getPrices(
+                pool.currency0.id,
+                pool.currency1.id,
+                timestampsToFetch
+            );
+
+            // Merge new prices with cached prices
+            Object.entries(newPrices[pool.currency0.id]).forEach(([timestampStr, price]) => {
+                const timestamp = parseInt(timestampStr);
+                // Find the closest day timestamp
+                const dayTimestamp = findClosestDayTimestamp(timestamp);
+                prices[pool.currency0.id][dayTimestamp] = price;
+            });
+
+            Object.entries(newPrices[pool.currency1.id]).forEach(([timestampStr, price]) => {
+                const timestamp = parseInt(timestampStr);
+                // Find the closest day timestamp
+                const dayTimestamp = findClosestDayTimestamp(timestamp);
+                prices[pool.currency1.id][dayTimestamp] = price;
+            });
+        } else if (uniqueTimestamps.length > 0) {
+            console.log('All required prices found in cache, no need to fetch from DeFiLlama');
+        }
+
+        // Process swaps and calculate markouts in a single pass
+        // Only process the new swaps
+        const newMarkouts = processSwapsAndCalculateMarkouts(newSwaps, pool, prices);
+
+        // Merge with cached markouts if available
+        let combinedMarkouts = newMarkouts;
+        if (hasCachedData && cachedResults.markouts && cachedResults.markouts.length > 0) {
+            console.log(`Merging ${cachedResults.markouts.length} cached markouts with ${newMarkouts.length} new markouts...`);
+            // Create a map of dates to markouts for easy lookup and merging
+            const markoutsByDate = new Map<string, MarkoutDatapoint>();
+
+            // Add cached markouts to the map
+            cachedResults.markouts.forEach(markout => {
+                markoutsByDate.set(markout.date, markout);
+            });
+
+            // Add or update with new markouts
+            newMarkouts.forEach(markout => {
+                markoutsByDate.set(markout.date, markout);
+            });
+
+            // Convert back to array and sort by date
+            combinedMarkouts = Array.from(markoutsByDate.values())
+                .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+            console.log(`Combined markouts: ${combinedMarkouts.length}`);
+        } else {
+            console.log(`Using only new markouts: ${newMarkouts.length}`);
+        }
+
+        // Create a filtered version of prices that excludes zero values for caching
+        const pricesToCache: PriceData = {
+            [pool.currency0.id]: {},
+            [pool.currency1.id]: {}
+        };
+
+        // Only include non-zero prices in the cache
+        Object.entries(prices[pool.currency0.id]).forEach(([timestampStr, price]) => {
+            const timestamp = parseInt(timestampStr);
+            // We don't need to find closest day timestamp here since the keys in prices
+            // should already be aligned to day timestamps from previous processing
+            if (price > 0) {
+                pricesToCache[pool.currency0.id][timestamp] = price;
+            }
+        });
+
+        Object.entries(prices[pool.currency1.id]).forEach(([timestampStr, price]) => {
+            const timestamp = parseInt(timestampStr);
+            // We don't need to find closest day timestamp here since the keys in prices
+            // should already be aligned to day timestamps from previous processing
+            if (price > 0) {
+                pricesToCache[pool.currency1.id][timestamp] = price;
+            }
+        });
+
+        // Cache the final results with filtered prices
         const resultsToCache: CachedResults = {
             poolId,
             network,
@@ -568,16 +889,24 @@ async function calculateMarkouts(poolId: string): Promise<void> {
                 currency0: pool.currency0.symbol,
                 currency1: pool.currency1.symbol
             },
-            swapCount: swaps.length,
-            markouts
+            swapCount: totalSwapCount,
+            lastTimestamp: latestTimestamp,
+            // Store the combined markouts in the cache
+            markouts: combinedMarkouts,
+            prices: {
+                token0Id: pool.currency0.id,
+                token1Id: pool.currency1.id,
+                data: pricesToCache
+            }
         };
 
         writeCache(resultsToCache);
 
         // Display results
-        displayMarkouts(markouts, pool.currency0.symbol, pool.currency1.symbol);
+        displayMarkouts(combinedMarkouts, pool.currency0.symbol, pool.currency1.symbol);
 
-        console.log(`\nTotal swaps processed: ${swaps.length}`);
+        console.log(`\nTotal swaps processed: ${totalSwapCount}`);
+        console.log(`New swaps processed: ${newSwaps.length}`);
         console.log(`Results cached to: ${MARKOUTS_CACHE_FILE}`);
 
     } catch (error) {

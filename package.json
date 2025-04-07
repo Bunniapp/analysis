@@ -9,6 +9,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@types/asciichart": "^1.5.8",
     "asciichart": "^1.5.25",
     "bignumber.js": "^9.1.2",
     "chalk": "^5.4.1",
