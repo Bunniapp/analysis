@@ -713,9 +713,6 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
         );
     });
 
-    // Add charts after the table
-    displayCharts(markouts);
-
     // Summary
     const lastMarkout = markouts[markouts.length - 1];
     console.log('\nSummary:');
@@ -723,33 +720,6 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     console.log(`Total days with swap activity: ${markouts.length}`);
     console.log(`Final cumulative markout: $${lastMarkout.cumulative.toFixed(2)}`);
     console.log(`Final cumulative TVL-adjusted markout: ${lastMarkout.cumulativeTvlAdjusted.times(100).toFixed(6)}%`);
-}
-
-// Add this function to generate charts
-function displayCharts(markouts: MarkoutDatapoint[]): void {
-    // Prepare data series
-    const cumulativeMarkouts = markouts.map(m => m.cumulative.toNumber());
-    const cumulativeTvlAdjusted = markouts.map(m => m.cumulativeTvlAdjusted.times(100).toNumber());
-
-    // Configuration for regular markout chart
-    const markoutConfig = {
-        height: 20,
-        colors: [asciichart.blue],
-    };
-
-    // Generate regular markout chart
-    console.log('\nCumulative Markout Performance Chart ($):');
-    console.log(asciichart.plot([cumulativeMarkouts], markoutConfig));
-
-    // Configuration for TVL-adjusted markout chart
-    const tvlAdjustedConfig = {
-        height: 20,
-        colors: [asciichart.green],
-    };
-
-    // Generate TVL-adjusted markout chart
-    console.log('\nCumulative TVL-Adjusted Markout Performance Chart (%):');
-    console.log(asciichart.plot([cumulativeTvlAdjusted], tvlAdjustedConfig));
 }
 
 // Get Aerodrome pool info
@@ -1526,6 +1496,48 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
     }
 }
 
+// Function to display a combined TVL-adjusted chart for both Bunni and Aerodrome pools
+function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: MarkoutDatapoint[]): void {
+    // Create maps for easy lookup
+    const bunniByDate = new Map<string, MarkoutDatapoint>();
+    const aeroByDate = new Map<string, MarkoutDatapoint>();
+
+    bunniMarkouts.forEach(m => bunniByDate.set(m.date, m));
+    aeroMarkouts.forEach(m => aeroByDate.set(m.date, m));
+
+    // Get all unique dates
+    const allDates = [...new Set([...bunniByDate.keys(), ...aeroByDate.keys()])].sort();
+
+    // Prepare data series for the combined chart
+    const bunniCumulativeTvlAdjusted: number[] = [];
+    const aeroCumulativeTvlAdjusted: number[] = [];
+
+    let lastBunniCumulative = 0;
+    let lastAeroCumulative = 0;
+
+    allDates.forEach(date => {
+        const bunni = bunniByDate.get(date);
+        const aero = aeroByDate.get(date);
+
+        if (bunni) lastBunniCumulative = bunni.cumulativeTvlAdjusted.times(100).toNumber();
+        if (aero) lastAeroCumulative = aero.cumulativeTvlAdjusted.times(100).toNumber();
+
+        bunniCumulativeTvlAdjusted.push(lastBunniCumulative);
+        aeroCumulativeTvlAdjusted.push(lastAeroCumulative);
+    });
+
+    // Configuration for combined TVL-adjusted markout chart
+    const combinedConfig = {
+        height: 20,
+        colors: [asciichart.blue, asciichart.green],
+    };
+
+    // Generate combined TVL-adjusted markout chart
+    console.log('\nCombined Cumulative TVL-Adjusted Markout Performance Chart (%):');
+    console.log('Blue: Bunni, Green: Aerodrome');
+    console.log(asciichart.plot([bunniCumulativeTvlAdjusted, aeroCumulativeTvlAdjusted], combinedConfig));
+}
+
 // Function to compare markouts from Bunni and Aerodrome pools
 function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: MarkoutDatapoint[]): void {
     console.log('\n---------------------------------------------------');
@@ -1581,6 +1593,9 @@ function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: Markou
         `${bunniCumulativeTvlAdj.times(100).toFixed(6)}%`.padEnd(18),
         `${aeroCumulativeTvlAdj.times(100).toFixed(6)}%`.padEnd(18)
     );
+
+    // Display the combined TVL-adjusted chart
+    displayCombinedTvlAdjustedChart(bunniMarkouts, aeroMarkouts);
 }
 
 // Main function to run both analyses and compare results
