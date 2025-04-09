@@ -30,7 +30,7 @@ interface Swap {
     pricePerVaultShare1: string;
 }
 
-interface AeroPool {
+interface UniPool {
     id: string;
     token0: {
         id: string;
@@ -43,14 +43,14 @@ interface AeroPool {
     createdAtTimestamp: string;
 }
 
-interface AeroSwap {
+interface UniSwap {
     id: string;
     timestamp: string;
     amount0: string; // Signed integer, positive means pool gained token0
     amount1: string; // Signed integer, positive means pool gained token1
 }
 
-interface AeroPoolHourData {
+interface UniPoolHourData {
     periodStartUnix: string;
     tvlUSD: string;
 }
@@ -107,9 +107,12 @@ interface CachedResults {
 // Parse command line arguments
 const args = process.argv.slice(2);
 let bunniPoolId = '';
-let aeroPoolId = '';
+let uniPoolId = '';
 let network = 'mainnet';
 let debug = false;
+
+type UniswapPoolType = 'Uniswap' | 'Aerodrome';
+let uniswapPoolType: UniswapPoolType = 'Uniswap';
 
 for (let i = 0; i < args.length; i++) {
     if ((args[i] === '--pool' || args[i] === '-p') && i + 1 < args.length) {
@@ -121,16 +124,22 @@ for (let i = 0; i < args.length; i++) {
     } else if (args[i] === '--debug' || args[i] === '-d') {
         debug = true;
     } else if ((args[i] === '--aerodrome' || args[i] === '-a') && i + 1 < args.length) {
-        aeroPoolId = args[i + 1].toLowerCase();
+        uniPoolId = args[i + 1].toLowerCase();
+        uniswapPoolType = 'Aerodrome';
+        i++;
+    } else if ((args[i] === '--uniswap' || args[i] === '-u') && i + 1 < args.length) {
+        uniPoolId = args[i + 1].toLowerCase();
+        uniswapPoolType = 'Uniswap';
         i++;
     } else if (args[i] === '--help' || args[i] === '-h') {
         console.log(`
-Usage: bun run markout.ts --pool <bunniPoolId> --aerodrome <aeroPoolId> [--network <network>] [--debug]
+Usage: bun run markout.ts --pool <bunniPoolId> [--uniswap <uniPoolId>] [--aerodrome <aeroPoolId>] [--network <network>] [--debug]
 
 Options:
-  --pool, -p         Bunni Pool ID (address)
-  --aerodrome, -a    Aerodrome Pool ID (address)
-  --network, -n      Network to query for Bunni pool (default: mainnet)
+  --pool, -p         Bunni Pool ID
+  --uniswap, -u      Uniswap Pool address
+  --aerodrome, -a    Aerodrome Pool address
+  --network, -n      Network to query for Bunni/Uniswap pool (default: mainnet)
   --debug, -d        Show debug information
   --help, -h         Show help
     `);
@@ -152,6 +161,11 @@ const SUBGRAPH_ENDPOINTS: Record<string, string> = {
     unichain: `https://subgraph.satsuma-prod.com/${process.env.SUBGRAPH_API_KEY}/bacon-labs/bunni-v2-unichain/api`
 };
 
+const UNISWAP_SUBGRAPH_ENDPOINTS: Record<string, string> = {
+    base: `https://gateway.thegraph.com/api/${process.env.THE_GRAPH_API_KEY}/subgraphs/id/HMuAwufqZ1YCRmzL2SfHTVkzZovC9VL2UAKhjvRqKiR1`,
+    mainnet: `https://gateway.thegraph.com/api/${process.env.THE_GRAPH_API_KEY}/subgraphs/id/5zvR82QoaXYFyDEKLZ9t6v9adgnptxYpKpSbxtgVENFV`,
+};
+
 // Aerodrome subgraph endpoint
 const AERO_SUBGRAPH_ENDPOINT = `https://gateway.thegraph.com/api/${process.env.THE_GRAPH_API_KEY}/subgraphs/id/GENunSHWLBXm59mBSgPzQ8metBEp9YDfdqwFr91Av1UM`;
 
@@ -164,6 +178,7 @@ const CHAIN_NAMES: Record<string, string> = {
 };
 
 const endpoint = SUBGRAPH_ENDPOINTS[network] || SUBGRAPH_ENDPOINTS.mainnet;
+const uniEndpoint = uniswapPoolType === 'Uniswap' ? UNISWAP_SUBGRAPH_ENDPOINTS[network] : AERO_SUBGRAPH_ENDPOINT;
 const chainName = CHAIN_NAMES[network] || 'ethereum';
 
 // Cache setup - Just a single file for markout results
@@ -171,8 +186,8 @@ const CACHE_DIR = path.join(process.cwd(), '.cache');
 const getBunniCacheFile = (id: string, net: string) => {
     return path.join(CACHE_DIR, `markouts_${net}_${id}.json`);
 };
-const getAeroCacheFile = (id: string) => {
-    return path.join(CACHE_DIR, `markouts_aerodrome_${id}.json`);
+const getUniCacheFile = (id: string) => {
+    return path.join(CACHE_DIR, `markouts_uniswap_${id}.json`);
 };
 
 // Create cache directory if it doesn't exist
@@ -226,8 +241,8 @@ const SWAPS_QUERY = gql`
   }
 `;
 
-const AERO_POOL_QUERY = gql`
-  query GetAeroPool($poolId: ID!) {
+const UNI_POOL_QUERY = gql`
+  query GetUniPool($poolId: ID!) {
     pool(id: $poolId) {
       id
       token0 {
@@ -243,8 +258,8 @@ const AERO_POOL_QUERY = gql`
   }
 `;
 
-const AERO_SWAPS_QUERY = gql`
-  query GetAeroSwaps($poolId: ID!, $skip: Int!, $startTime: Int!, $endTime: Int!) {
+const UNI_SWAPS_QUERY = gql`
+  query GetUniSwaps($poolId: ID!, $skip: Int!, $startTime: Int!, $endTime: Int!) {
     swaps(
       first: 1000,
       skip: $skip,
@@ -264,7 +279,7 @@ const AERO_SWAPS_QUERY = gql`
   }
 `;
 
-// Note: We're using a custom query in getAeroPoolHourData function instead of a predefined one
+// Note: We're using a custom query in getUniPoolHourData function instead of a predefined one
 
 // Read cache
 function readCache(cacheFile: string): CachedResults | null {
@@ -722,31 +737,31 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     console.log(`Final cumulative TVL-adjusted markout: ${lastMarkout.cumulativeTvlAdjusted.times(100).toFixed(6)}%`);
 }
 
-// Get Aerodrome pool info
-async function getAeroPoolInfo(poolId: string): Promise<AeroPool> {
-    console.log(`Fetching Aerodrome pool info for: ${poolId}...`);
+// Get Uniswap/Aerodrome pool info
+async function getUniPoolInfo(poolId: string): Promise<UniPool> {
+    console.log(`Fetching ${uniswapPoolType} pool info for: ${poolId}...`);
 
-    const { pool } = await request<{ pool: AeroPool }>(AERO_SUBGRAPH_ENDPOINT, AERO_POOL_QUERY, {
+    const { pool } = await request<{ pool: UniPool }>(uniEndpoint, UNI_POOL_QUERY, {
         poolId: poolId.toLowerCase()
     });
 
-    if (!pool) throw new Error(`Aerodrome pool with ID ${poolId} not found`);
+    if (!pool) throw new Error(`Uniswap/Aerodrome pool with ID ${poolId} not found`);
 
     return pool;
 }
 
-// Get all Aerodrome swaps for a pool, starting from a specific timestamp
-async function getAllAeroSwaps(poolId: string, startTime: number = 0): Promise<AeroSwap[]> {
-    console.log(`Fetching Aerodrome swaps from timestamp ${startTime}...`);
+// Get all Uniswap/Aerodrome swaps for a pool, starting from a specific timestamp
+async function getAllUniSwaps(poolId: string, startTime: number = 0): Promise<UniSwap[]> {
+    console.log(`Fetching ${uniswapPoolType} swaps from timestamp ${startTime}...`);
 
-    const swaps: AeroSwap[] = [];
+    const swaps: UniSwap[] = [];
     let skip = 0;
 
     const endTime = Math.floor(Date.now() / 1000 / 86400) * 86400; // don't need today's data
     console.log(`Fetching swaps until timestamp ${endTime}...`);
 
     while (true) {
-        const data = await request<{ swaps: AeroSwap[] }>(AERO_SUBGRAPH_ENDPOINT, AERO_SWAPS_QUERY, {
+        const data = await request<{ swaps: UniSwap[] }>(uniEndpoint, UNI_SWAPS_QUERY, {
             poolId: poolId.toLowerCase(),
             skip,
             startTime,
@@ -771,7 +786,7 @@ function getHourTimestamp(timestamp: number): number {
 }
 
 // Get the hourly timestamps that are closest to the swap timestamps
-function getRelevantHourTimestamps(swaps: AeroSwap[]): number[] {
+function getRelevantHourTimestamps(swaps: UniSwap[]): number[] {
     // Extract all swap timestamps and convert to hour timestamps
     const hourTimestamps = swaps.map(swap => {
         const swapTs = parseInt(swap.timestamp);
@@ -786,14 +801,14 @@ function getRelevantHourTimestamps(swaps: AeroSwap[]): number[] {
     return [...new Set(allTimestamps)];
 }
 
-// Get hourly TVL data for an Aerodrome pool for specific hour timestamps
-async function getAeroPoolHourData(poolId: string, hourTimestamps: number[]): Promise<AeroPoolHourData[]> {
+// Get hourly TVL data for a Uniswap/Aerodrome pool for specific hour timestamps
+async function getUniPoolHourData(poolId: string, hourTimestamps: number[]): Promise<UniPoolHourData[]> {
     if (hourTimestamps.length === 0) {
         console.log('No hour timestamps provided, skipping TVL data fetch');
         return [];
     }
 
-    console.log(`Fetching Aerodrome hourly TVL data for ${hourTimestamps.length} specific hours...`);
+    console.log(`Fetching ${uniswapPoolType} hourly TVL data for ${hourTimestamps.length} specific hours...`);
 
     // Sort timestamps for better logging
     const sortedTimestamps = [...hourTimestamps].sort((a, b) => a - b);
@@ -804,7 +819,7 @@ async function getAeroPoolHourData(poolId: string, hourTimestamps: number[]): Pr
 
     // We need to use the 'in' operator for the GraphQL query to filter by specific timestamps
     // But first check if the array is not too large to avoid URL length issues
-    let poolHourDatas: AeroPoolHourData[] = [];
+    let poolHourDatas: UniPoolHourData[] = [];
 
     // If we have too many timestamps, we'll need to batch the requests
     const BATCH_SIZE = 100; // Adjust based on GraphQL endpoint limitations
@@ -814,7 +829,7 @@ async function getAeroPoolHourData(poolId: string, hourTimestamps: number[]): Pr
 
         // Create a custom query for this batch
         const batchQuery = gql`
-          query GetAeroPoolHourData($poolId: ID!, $hourTimestamps: [Int!]) {
+          query GetUniPoolHourData($poolId: ID!, $hourTimestamps: [Int!]) {
             poolHourDatas(
               first: 1000,
               where: {
@@ -832,7 +847,7 @@ async function getAeroPoolHourData(poolId: string, hourTimestamps: number[]): Pr
 
         process.stdout.write(`\rFetching batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(hourTimestamps.length / BATCH_SIZE)}...`);
 
-        const result = await request<{ poolHourDatas: AeroPoolHourData[] }>(AERO_SUBGRAPH_ENDPOINT, batchQuery, {
+        const result = await request<{ poolHourDatas: UniPoolHourData[] }>(uniEndpoint, batchQuery, {
             poolId: poolId.toLowerCase(),
             hourTimestamps: batchTimestamps
         });
@@ -844,14 +859,14 @@ async function getAeroPoolHourData(poolId: string, hourTimestamps: number[]): Pr
     return poolHourDatas;
 }
 
-// Process Aerodrome swaps and calculate markouts
-function processAeroSwapsAndCalculateMarkouts(
-    swaps: AeroSwap[],
-    pool: AeroPool,
+// Process Uniswap/Aerodrome swaps and calculate markouts
+function processUniSwapsAndCalculateMarkouts(
+    swaps: UniSwap[],
+    pool: UniPool,
     prices: PriceData,
-    hourlyData: AeroPoolHourData[]
+    hourlyData: UniPoolHourData[]
 ): MarkoutDatapoint[] {
-    console.log('\nProcessing Aerodrome swaps and calculating markouts...');
+    console.log('\nProcessing ${uniswapPoolType} swaps and calculating markouts...');
 
     const dayInSeconds = 86400;
     const dailyData: Record<number, {
@@ -902,7 +917,7 @@ function processAeroSwapsAndCalculateMarkouts(
     };
 
     // Process each swap and group by day
-    swaps.forEach((swap: AeroSwap) => {
+    swaps.forEach((swap: UniSwap) => {
         const swapTimestamp = parseInt(swap.timestamp);
         const dayTs = getDayTimestamp(swapTimestamp);
         const dateStr = formatDate(dayTs);
@@ -997,10 +1012,10 @@ function processAeroSwapsAndCalculateMarkouts(
     return markouts;
 }
 
-// Main function to calculate Aerodrome markouts
-async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, startTimestamp: number = 0): Promise<MarkoutDatapoint[]> {
+// Main function to calculate Uniswap/Aerodrome markouts
+async function calculateUniswapMarkouts(poolId: string, cacheFile: string, startTimestamp: number = 0): Promise<MarkoutDatapoint[]> {
     try {
-        console.log(`Running markout calculator for Aerodrome pool ${poolId}`);
+        console.log(`Running markout calculator for ${uniswapPoolType} pool ${poolId}`);
 
         if (startTimestamp > 0) {
             console.log(`Using Bunni pool's creation timestamp as start time: ${startTimestamp} (${new Date(startTimestamp * 1000).toISOString()})`);
@@ -1013,7 +1028,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         // Check if we have valid cached data for this pool
         const hasCachedData = cachedResults &&
             cachedResults.poolId === poolId &&
-            cachedResults.network === 'aerodrome'; // Use 'aerodrome' as network for Aerodrome pools
+            cachedResults.network === network;
 
         if (hasCachedData) {
             console.log('Found cached data, will fetch only new swaps...');
@@ -1030,7 +1045,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         }
 
         // Fetch pool info
-        const pool = await getAeroPoolInfo(poolId);
+        const pool = await getUniPoolInfo(poolId);
 
         // Show token info if debug mode
         if (debug) {
@@ -1040,7 +1055,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         }
 
         // Fetch new swaps since the last processed timestamp
-        const newSwaps = await getAllAeroSwaps(poolId, startTime);
+        const newSwaps = await getAllUniSwaps(poolId, startTime);
 
         // If no new swaps and no cached data, nothing to do
         if (newSwaps.length === 0 && !hasCachedData) {
@@ -1074,7 +1089,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         // Show first few swaps in debug mode
         if (debug && newSwaps.length > 0) {
             console.log(`\nSample Swap Data (First 3):`);
-            newSwaps.slice(0, 3).forEach((swap: AeroSwap, i: number) => {
+            newSwaps.slice(0, 3).forEach((swap: UniSwap, i: number) => {
                 console.log(`Swap ${i + 1}:`);
                 console.log(`  Timestamp: ${swap.timestamp} (${new Date(parseInt(swap.timestamp) * 1000).toISOString()})`);
                 console.log(`  Amount0: ${swap.amount0}`);
@@ -1093,7 +1108,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
 
         // Get all timestamps we need prices for
         const allTimestamps: number[] = [];
-        newSwaps.forEach((swap: AeroSwap) => {
+        newSwaps.forEach((swap: UniSwap) => {
             const dayTs = getDayTimestamp(parseInt(swap.timestamp));
             allTimestamps.push(dayTs + dayInSeconds);
         });
@@ -1155,10 +1170,10 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         const relevantHourTimestamps = getRelevantHourTimestamps(newSwaps);
 
         // Fetch hourly TVL data only for the relevant hours
-        const hourlyData = await getAeroPoolHourData(poolId, relevantHourTimestamps);
+        const hourlyData = await getUniPoolHourData(poolId, relevantHourTimestamps);
 
         // Process swaps and calculate markouts
-        const newMarkouts = processAeroSwapsAndCalculateMarkouts(newSwaps, pool, prices, hourlyData);
+        const newMarkouts = processUniSwapsAndCalculateMarkouts(newSwaps, pool, prices, hourlyData);
 
         // Merge with cached markouts if available
         let combinedMarkouts = newMarkouts;
@@ -1214,7 +1229,7 @@ async function calculateAerodromeMarkouts(poolId: string, cacheFile: string, sta
         // Cache the final results with filtered prices
         const resultsToCache: CachedResults = {
             poolId,
-            network: 'aerodrome', // Use 'aerodrome' as network for Aerodrome pools
+            network: uniswapPoolType === 'Uniswap' ? network : 'aerodrome', // Use 'aerodrome' as network for Aerodrome pools
             poolSymbols: {
                 currency0: pool.token0.symbol,
                 currency1: pool.token1.symbol
@@ -1496,34 +1511,34 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
     }
 }
 
-// Function to display a combined TVL-adjusted chart for both Bunni and Aerodrome pools
-function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: MarkoutDatapoint[]): void {
+// Function to display a combined TVL-adjusted chart for both Bunni and Uniswap/Aerodrome pools
+function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], uniMarkouts: MarkoutDatapoint[]): void {
     // Create maps for easy lookup
     const bunniByDate = new Map<string, MarkoutDatapoint>();
-    const aeroByDate = new Map<string, MarkoutDatapoint>();
+    const uniByDate = new Map<string, MarkoutDatapoint>();
 
     bunniMarkouts.forEach(m => bunniByDate.set(m.date, m));
-    aeroMarkouts.forEach(m => aeroByDate.set(m.date, m));
+    uniMarkouts.forEach(m => uniByDate.set(m.date, m));
 
     // Get all unique dates
-    const allDates = [...new Set([...bunniByDate.keys(), ...aeroByDate.keys()])].sort();
+    const allDates = [...new Set([...bunniByDate.keys(), ...uniByDate.keys()])].sort();
 
     // Prepare data series for the combined chart
     const bunniCumulativeTvlAdjusted: number[] = [];
-    const aeroCumulativeTvlAdjusted: number[] = [];
+    const uniCumulativeTvlAdjusted: number[] = [];
 
     let lastBunniCumulative = 0;
-    let lastAeroCumulative = 0;
+    let lastUniCumulative = 0;
 
     allDates.forEach(date => {
         const bunni = bunniByDate.get(date);
-        const aero = aeroByDate.get(date);
+        const uni = uniByDate.get(date);
 
         if (bunni) lastBunniCumulative = bunni.cumulativeTvlAdjusted.times(100).toNumber();
-        if (aero) lastAeroCumulative = aero.cumulativeTvlAdjusted.times(100).toNumber();
+        if (uni) lastUniCumulative = uni.cumulativeTvlAdjusted.times(100).toNumber();
 
         bunniCumulativeTvlAdjusted.push(lastBunniCumulative);
-        aeroCumulativeTvlAdjusted.push(lastAeroCumulative);
+        uniCumulativeTvlAdjusted.push(lastUniCumulative);
     });
 
     // Configuration for combined TVL-adjusted markout chart
@@ -1534,54 +1549,54 @@ function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], aero
 
     // Generate combined TVL-adjusted markout chart
     console.log('\nCombined Cumulative TVL-Adjusted Markout Performance Chart (%):');
-    console.log('Blue: Bunni, Green: Aerodrome');
-    console.log(asciichart.plot([bunniCumulativeTvlAdjusted, aeroCumulativeTvlAdjusted], combinedConfig));
+    console.log(`Blue: Bunni, Green: ${uniswapPoolType}`);
+    console.log(asciichart.plot([bunniCumulativeTvlAdjusted, uniCumulativeTvlAdjusted], combinedConfig));
 }
 
-// Function to compare markouts from Bunni and Aerodrome pools
-function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: MarkoutDatapoint[]): void {
+// Function to compare markouts from Bunni and UniswapAerodrome pools
+function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], uniMarkouts: MarkoutDatapoint[]): void {
     console.log('\n---------------------------------------------------');
-    console.log('Comparison of Bunni and Aerodrome Pool Performance:');
+    console.log(`Comparison of Bunni and ${uniswapPoolType} Pool Performance:`);
     console.log('---------------------------------------------------');
 
     // Create a map of dates for easy lookup
     const bunniByDate = new Map<string, MarkoutDatapoint>();
-    const aeroByDate = new Map<string, MarkoutDatapoint>();
+    const uniByDate = new Map<string, MarkoutDatapoint>();
 
     bunniMarkouts.forEach(m => bunniByDate.set(m.date, m));
-    aeroMarkouts.forEach(m => aeroByDate.set(m.date, m));
+    uniMarkouts.forEach(m => uniByDate.set(m.date, m));
 
     // Get all unique dates
-    const allDates = [...new Set([...bunniByDate.keys(), ...aeroByDate.keys()])].sort();
+    const allDates = [...new Set([...bunniByDate.keys(), ...uniByDate.keys()])].sort();
 
     // Display comparison table
     console.log('Date'.padEnd(12),
         'Bunni Markout ($)'.padEnd(18),
-        'Aero Markout ($)'.padEnd(18),
+        `${uniswapPoolType} Markout ($)`.padEnd(18),
         'Bunni TVL-Adj (%)'.padEnd(18),
-        'Aero TVL-Adj (%)'.padEnd(18));
+        `${uniswapPoolType} TVL-Adj (%)`.padEnd(18));
     console.log('-'.repeat(85));
 
     let bunniCumulative = new BigNumber(0);
-    let aeroCumulative = new BigNumber(0);
+    let uniCumulative = new BigNumber(0);
     let bunniCumulativeTvlAdj = new BigNumber(0);
-    let aeroCumulativeTvlAdj = new BigNumber(0);
+    let uniCumulativeTvlAdj = new BigNumber(0);
 
     allDates.forEach(date => {
         const bunni = bunniByDate.get(date);
-        const aero = aeroByDate.get(date);
+        const uni = uniByDate.get(date);
 
         if (bunni) bunniCumulative = bunni.cumulative;
-        if (aero) aeroCumulative = aero.cumulative;
+        if (uni) uniCumulative = uni.cumulative;
         if (bunni) bunniCumulativeTvlAdj = bunni.cumulativeTvlAdjusted;
-        if (aero) aeroCumulativeTvlAdj = aero.cumulativeTvlAdjusted;
+        if (uni) uniCumulativeTvlAdj = uni.cumulativeTvlAdjusted;
 
         console.log(
             date.padEnd(12),
             bunni ? `$${bunni.markout.toFixed(2)}`.padEnd(18) : 'N/A'.padEnd(18),
-            aero ? `$${aero.markout.toFixed(2)}`.padEnd(18) : 'N/A'.padEnd(18),
+            uni ? `$${uni.markout.toFixed(2)}`.padEnd(18) : 'N/A'.padEnd(18),
             bunni ? `${bunni.tvlAdjustedMarkout.times(100).toFixed(6)}%`.padEnd(18) : 'N/A'.padEnd(18),
-            aero ? `${aero.tvlAdjustedMarkout.times(100).toFixed(6)}%`.padEnd(18) : 'N/A'.padEnd(18)
+            uni ? `${uni.tvlAdjustedMarkout.times(100).toFixed(6)}%`.padEnd(18) : 'N/A'.padEnd(18)
         );
     });
 
@@ -1589,18 +1604,18 @@ function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], aeroMarkouts: Markou
     console.log(
         'TOTAL'.padEnd(12),
         `$${bunniCumulative.toFixed(2)}`.padEnd(18),
-        `$${aeroCumulative.toFixed(2)}`.padEnd(18),
+        `$${uniCumulative.toFixed(2)}`.padEnd(18),
         `${bunniCumulativeTvlAdj.times(100).toFixed(6)}%`.padEnd(18),
-        `${aeroCumulativeTvlAdj.times(100).toFixed(6)}%`.padEnd(18)
+        `${uniCumulativeTvlAdj.times(100).toFixed(6)}%`.padEnd(18)
     );
 
     // Display the combined TVL-adjusted chart
-    displayCombinedTvlAdjustedChart(bunniMarkouts, aeroMarkouts);
+    displayCombinedTvlAdjustedChart(bunniMarkouts, uniMarkouts);
 }
 
 // Main function to run both analyses and compare results
 async function runComparison(): Promise<void> {
-    console.log('Starting comparison between Bunni and Aerodrome pools...\n');
+    console.log(`Starting comparison between Bunni and ${uniswapPoolType} pools...\n`);
 
     // Get Bunni pool info to determine creation timestamp
     let bunniCreationTimestamp = 0;
@@ -1617,17 +1632,17 @@ async function runComparison(): Promise<void> {
     const bunniCacheFile = getBunniCacheFile(bunniPoolId, network);
     const bunniMarkouts = await calculateBunniMarkouts(bunniPoolId, bunniCacheFile);
 
-    // Calculate Aerodrome markouts if provided, using Bunni pool's creation timestamp
-    let aeroMarkouts: MarkoutDatapoint[] = [];
-    if (aeroPoolId) {
+    // Calculate Uniswap/Aerodrome markouts if provided, using Bunni pool's creation timestamp
+    let uniMarkouts: MarkoutDatapoint[] = [];
+    if (uniPoolId) {
         console.log('\n---------------------------------------------------\n');
-        const aeroCacheFile = getAeroCacheFile(aeroPoolId);
-        aeroMarkouts = await calculateAerodromeMarkouts(aeroPoolId, aeroCacheFile, bunniCreationTimestamp);
+        const uniCacheFile = getUniCacheFile(uniPoolId);
+        uniMarkouts = await calculateUniswapMarkouts(uniPoolId, uniCacheFile, bunniCreationTimestamp);
     }
 
     // Compare results if both analyses were run
-    if (bunniMarkouts.length > 0 && aeroMarkouts.length > 0) {
-        compareMarkouts(bunniMarkouts, aeroMarkouts);
+    if (bunniMarkouts.length > 0 && uniMarkouts.length > 0) {
+        compareMarkouts(bunniMarkouts, uniMarkouts);
     }
 }
 
