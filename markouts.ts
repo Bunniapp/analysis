@@ -82,9 +82,9 @@ interface MarkoutDatapoint {
     price0: BigNumber;
     price1: BigNumber;
     markout: BigNumber;
-    cumulative: BigNumber;
+    cumulative?: BigNumber; // Optional - will be calculated at runtime
     tvlAdjustedMarkout: BigNumber; // Daily TVL-adjusted markout
-    cumulativeTvlAdjusted: BigNumber; // Cumulative TVL-adjusted markout
+    cumulativeTvlAdjusted?: BigNumber; // Optional - will be calculated at runtime
 }
 
 interface CachedResults {
@@ -655,10 +655,8 @@ function processSwapsAndCalculateMarkouts(
         .map(([timestamp, data]) => ({ timestamp: parseInt(timestamp), ...data }))
         .sort((a, b) => a.timestamp - b.timestamp);
 
-    // Calculate markouts and cumulative values
+    // Calculate markouts without cumulative values (will be calculated at runtime when needed)
     const markouts: MarkoutDatapoint[] = [];
-    let cumulative = new BigNumber(0);
-    let cumulativeTvlAdjusted = new BigNumber(0);
 
     for (const day of dailyChanges) {
         // Get EOD timestamp
@@ -671,11 +669,7 @@ function processSwapsAndCalculateMarkouts(
         // Calculate daily markout using EOD prices
         const dailyMarkout = day.delta0.times(price0).plus(day.delta1.times(price1));
 
-        // Update cumulative values
-        cumulative = cumulative.plus(dailyMarkout);
-        cumulativeTvlAdjusted = cumulativeTvlAdjusted.plus(day.tvlAdjustedMarkout);
-
-        // Create markout datapoint
+        // Create markout datapoint without cumulative values
         markouts.push({
             date: day.date,
             swapCount: day.swapCount,
@@ -684,9 +678,7 @@ function processSwapsAndCalculateMarkouts(
             price0,
             price1,
             markout: dailyMarkout,
-            cumulative,
-            tvlAdjustedMarkout: day.tvlAdjustedMarkout,
-            cumulativeTvlAdjusted
+            tvlAdjustedMarkout: day.tvlAdjustedMarkout
         });
     }
 
@@ -696,6 +688,22 @@ function processSwapsAndCalculateMarkouts(
 // Print markout results
 function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, currency1Symbol: string): void {
     if (currency0Symbol === 'Native Currency') currency0Symbol = 'ETH';
+
+    // Calculate cumulative values at runtime
+    let cumulativeMarkout = new BigNumber(0);
+    let cumulativeTvlAdjusted = new BigNumber(0);
+
+    // Add cumulative values to each markout
+    const marksWithCumulative = markouts.map(m => {
+        cumulativeMarkout = cumulativeMarkout.plus(m.markout);
+        cumulativeTvlAdjusted = cumulativeTvlAdjusted.plus(m.tvlAdjustedMarkout);
+
+        return {
+            ...m,
+            cumulative: cumulativeMarkout,
+            cumulativeTvlAdjusted: cumulativeTvlAdjusted
+        };
+    });
 
     console.log('\nDaily Markout Results using EOD price:');
     console.log('-'.repeat(140)); // Wider to accommodate TVL-adjusted columns
@@ -713,7 +721,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     );
     console.log('-'.repeat(140));
 
-    markouts.forEach(m => {
+    marksWithCumulative.forEach(m => {
         console.log(
             m.date.padEnd(12),
             m.swapCount.toString().padEnd(8),
@@ -729,7 +737,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
     });
 
     // Summary
-    const lastMarkout = markouts[markouts.length - 1];
+    const lastMarkout = marksWithCumulative[marksWithCumulative.length - 1];
     console.log('\nSummary:');
     console.log(`Pool: ${currency0Symbol}/${currency1Symbol}`);
     console.log(`Total days with swap activity: ${markouts.length}`);
@@ -866,7 +874,7 @@ function processUniSwapsAndCalculateMarkouts(
     prices: PriceData,
     hourlyData: UniPoolHourData[]
 ): MarkoutDatapoint[] {
-    console.log('\nProcessing ${uniswapPoolType} swaps and calculating markouts...');
+    console.log(`\nProcessing ${uniswapPoolType} swaps and calculating markouts...`); // Fixed string interpolation
 
     const dayInSeconds = 86400;
     const dailyData: Record<number, {
@@ -974,10 +982,8 @@ function processUniSwapsAndCalculateMarkouts(
         .map(([timestamp, data]) => ({ timestamp: parseInt(timestamp), ...data }))
         .sort((a, b) => a.timestamp - b.timestamp);
 
-    // Calculate markouts and cumulative values
+    // Calculate markouts without cumulative values (will be calculated at runtime when needed)
     const markouts: MarkoutDatapoint[] = [];
-    let cumulative = new BigNumber(0);
-    let cumulativeTvlAdjusted = new BigNumber(0);
 
     for (const day of dailyChanges) {
         // Get EOD timestamp
@@ -990,11 +996,7 @@ function processUniSwapsAndCalculateMarkouts(
         // Calculate daily markout using EOD prices
         const dailyMarkout = day.delta0.times(price0).plus(day.delta1.times(price1));
 
-        // Update cumulative values
-        cumulative = cumulative.plus(dailyMarkout);
-        cumulativeTvlAdjusted = cumulativeTvlAdjusted.plus(day.tvlAdjustedMarkout);
-
-        // Create markout datapoint
+        // Create markout datapoint without cumulative values
         markouts.push({
             date: day.date,
             swapCount: day.swapCount,
@@ -1003,9 +1005,7 @@ function processUniSwapsAndCalculateMarkouts(
             price0,
             price1,
             markout: dailyMarkout,
-            cumulative,
-            tvlAdjustedMarkout: day.tvlAdjustedMarkout,
-            cumulativeTvlAdjusted
+            tvlAdjustedMarkout: day.tvlAdjustedMarkout
         });
     }
 
@@ -1013,39 +1013,62 @@ function processUniSwapsAndCalculateMarkouts(
 }
 
 // Main function to calculate Uniswap/Aerodrome markouts
-async function calculateUniswapMarkouts(poolId: string, cacheFile: string, startTimestamp: number = 0): Promise<MarkoutDatapoint[]> {
+async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunniStartTimestamp: number = 0): Promise<MarkoutDatapoint[]> {
     try {
         console.log(`Running markout calculator for ${uniswapPoolType} pool ${poolId}`);
 
-        if (startTimestamp > 0) {
-            console.log(`Using Bunni pool's creation timestamp as start time: ${startTimestamp} (${new Date(startTimestamp * 1000).toISOString()})`);
-        }
-
         // Read cache to get existing data
         const cachedResults = readCache(cacheFile);
-        let startTime = startTimestamp;
+
+        // Fetch pool info to get creation timestamp
+        const pool = await getUniPoolInfo(poolId);
+        const poolCreationTimestamp = parseInt(pool.createdAtTimestamp);
+
+        console.log(`${uniswapPoolType} pool was created at timestamp ${poolCreationTimestamp} (${new Date(poolCreationTimestamp * 1000).toISOString()})`);
+
+        // Determine the start time for fetching data
+        let startTime = poolCreationTimestamp;
+
+        // If Bunni pool's inception date is provided and it's after the pool creation date,
+        // use the Bunni pool's inception date as the start time
+        if (bunniStartTimestamp > 0) {
+            console.log(`Bunni pool's creation timestamp: ${bunniStartTimestamp} (${new Date(bunniStartTimestamp * 1000).toISOString()})`);
+
+            // If Bunni pool was created after this pool, we'll start from Bunni's creation
+            if (bunniStartTimestamp > poolCreationTimestamp) {
+                startTime = bunniStartTimestamp;
+                console.log(`Using Bunni pool's creation timestamp as start time since it's newer`);
+            } else {
+                console.log(`Using ${uniswapPoolType} pool's creation timestamp as start time since it's newer than Bunni's`);
+            }
+        }
 
         // Check if we have valid cached data for this pool
         const hasCachedData = cachedResults &&
             cachedResults.poolId === poolId &&
-            cachedResults.network === network;
+            cachedResults.network === (uniswapPoolType === 'Uniswap' ? network : 'aerodrome');
 
-        if (hasCachedData) {
-            console.log('Found cached data, will fetch only new swaps...');
-
-            // Get the last processed timestamp to use as our starting point
-            if (cachedResults.lastTimestamp) {
-                startTime = parseInt(cachedResults.lastTimestamp);
-                console.log(`Will fetch swaps after timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
-            } else {
-                console.log('No lastTimestamp found in cache, will fetch all swaps');
-            }
-        } else {
-            console.log('No valid cached results found, calculating markouts from scratch');
+        let cachedStartTime = 0;
+        if (hasCachedData && cachedResults.lastTimestamp) {
+            cachedStartTime = parseInt(cachedResults.lastTimestamp);
+            console.log(`Found cached data with last timestamp ${cachedStartTime} (${new Date(cachedStartTime * 1000).toISOString()})`);
         }
 
-        // Fetch pool info
-        const pool = await getUniPoolInfo(poolId);
+        // Determine if we need to fetch historical data
+        let needHistoricalData = false;
+        if (hasCachedData && bunniStartTimestamp > 0 && bunniStartTimestamp < cachedStartTime) {
+            // If Bunni pool's inception is before the oldest cached data point, we need to fetch missing data
+            needHistoricalData = true;
+            console.log(`Bunni pool's inception (${new Date(bunniStartTimestamp * 1000).toISOString()}) is before the oldest cached data point (${new Date(cachedStartTime * 1000).toISOString()})`);
+            console.log(`Will fetch missing historical data from ${bunniStartTimestamp} to ${cachedStartTime}`);
+            startTime = bunniStartTimestamp;
+        } else if (hasCachedData && !needHistoricalData) {
+            // If we have cached data and don't need historical data, start from the last timestamp
+            startTime = cachedStartTime;
+            console.log(`Will fetch new swaps after timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+        } else {
+            console.log(`Will fetch all swaps from timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+        }
 
         // Show token info if debug mode
         if (debug) {
@@ -1054,26 +1077,36 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, start
             console.log(`Token 1: ${pool.token1.symbol} (ID: ${pool.token1.id})`);
         }
 
-        // Fetch new swaps since the last processed timestamp
+        // Fetch swaps since the determined start time
         const newSwaps = await getAllUniSwaps(poolId, startTime);
 
-        // If no new swaps and no cached data, nothing to do
+        // If no swaps found, handle accordingly
         if (newSwaps.length === 0 && !hasCachedData) {
             console.log('No swaps found for this pool.');
             return [];
         }
 
-        // If no new swaps but we have cached data, just display the cached results
         if (newSwaps.length === 0 && hasCachedData) {
             console.log('No new swaps found since last update. Using cached markouts.');
+
+            // Filter cached markouts to only include those after Bunni pool's inception if needed
+            let filteredMarkouts = cachedResults.markouts;
+            if (bunniStartTimestamp > 0) {
+                const bunniStartDate = formatDate(bunniStartTimestamp);
+                filteredMarkouts = cachedResults.markouts.filter(m => {
+                    return new Date(m.date) >= new Date(bunniStartDate);
+                });
+                console.log(`Filtered markouts to only include those after Bunni pool's inception: ${filteredMarkouts.length} of ${cachedResults.markouts.length}`);
+            }
+
             displayMarkouts(
-                cachedResults.markouts,
+                filteredMarkouts,
                 pool.token0.symbol,
                 pool.token1.symbol
             );
             console.log(`\nTotal swaps processed: ${cachedResults.swapCount}`);
             console.log(`Cache file: ${cacheFile}`);
-            return cachedResults.markouts;
+            return filteredMarkouts;
         }
 
         // Get the latest timestamp from the new swaps for caching
@@ -1081,7 +1114,7 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, start
             newSwaps[newSwaps.length - 1].timestamp :
             startTime.toString();
 
-        // Calculate total swap count (cached + new)
+        // Calculate total swap count
         const totalSwapCount = hasCachedData ?
             cachedResults.swapCount + newSwaps.length :
             newSwaps.length;
@@ -1187,12 +1220,8 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, start
                 markoutsByDate.set(markout.date, markout);
             });
 
-            // Add or update with new markouts
+            // Add or update with new markouts (without relying on cached cumulative values)
             newMarkouts.forEach(markout => {
-                // Add the last cached datapoint to markout
-                markout.cumulative = cachedResults.markouts[cachedResults.markouts.length - 1].cumulative.plus(markout.cumulative);
-                markout.cumulativeTvlAdjusted = cachedResults.markouts[cachedResults.markouts.length - 1].cumulativeTvlAdjusted.plus(markout.cumulativeTvlAdjusted);
-
                 markoutsByDate.set(markout.date, markout);
             });
 
@@ -1203,6 +1232,16 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, start
             console.log(`Combined markouts: ${combinedMarkouts.length}`);
         } else {
             console.log(`Using only new markouts: ${newMarkouts.length}`);
+        }
+
+        // Filter markouts to only include those after Bunni pool's inception if needed
+        if (bunniStartTimestamp > 0) {
+            const bunniStartDate = formatDate(bunniStartTimestamp);
+            const originalLength = combinedMarkouts.length;
+            combinedMarkouts = combinedMarkouts.filter(m => {
+                return new Date(m.date) >= new Date(bunniStartDate);
+            });
+            console.log(`Filtered markouts to only include those after Bunni pool's inception: ${combinedMarkouts.length} of ${originalLength}`);
         }
 
         // Create a filtered version of prices that excludes zero values for caching
@@ -1236,7 +1275,7 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, start
             },
             swapCount: totalSwapCount,
             lastTimestamp: latestTimestamp,
-            // Store the combined markouts in the cache
+            // Store the combined markouts in the cache (without cumulative values)
             markouts: combinedMarkouts,
             prices: {
                 token0Id: pool.token0.id,
@@ -1268,7 +1307,15 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
 
         // Read cache to get existing data
         const cachedResults = readCache(cacheFile);
-        let startTime = 0;
+
+        // Fetch pool info to get creation timestamp
+        const pool = await getPoolInfo(poolId);
+        const poolCreationTimestamp = parseInt(pool.creationTimestamp);
+
+        console.log(`Bunni pool was created at timestamp ${poolCreationTimestamp} (${new Date(poolCreationTimestamp * 1000).toISOString()})`);
+
+        // Determine the start time for fetching data
+        let startTime = poolCreationTimestamp;
 
         // Check if we have valid cached data for this pool and network
         const hasCachedData = cachedResults &&
@@ -1288,9 +1335,6 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
         } else {
             console.log('No valid cached results found, calculating markouts from scratch');
         }
-
-        // Fetch pool info
-        const pool = await getPoolInfo(poolId);
 
         // Show token info if debug mode
         if (debug) {
@@ -1433,12 +1477,8 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
                 markoutsByDate.set(markout.date, markout);
             });
 
-            // Add or update with new markouts
+            // Add or update with new markouts (without relying on cached cumulative values)
             newMarkouts.forEach(markout => {
-                // Add the last cached datapoint to markout
-                markout.cumulative = cachedResults.markouts[cachedResults.markouts.length - 1].cumulative.plus(markout.cumulative);
-                markout.cumulativeTvlAdjusted = cachedResults.markouts[cachedResults.markouts.length - 1].cumulativeTvlAdjusted.plus(markout.cumulativeTvlAdjusted);
-
                 markoutsByDate.set(markout.date, markout);
             });
 
@@ -1486,7 +1526,7 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             },
             swapCount: totalSwapCount,
             lastTimestamp: latestTimestamp,
-            // Store the combined markouts in the cache
+            // Store the combined markouts in the cache (without cumulative values)
             markouts: combinedMarkouts,
             prices: {
                 token0Id: pool.currency0.id,
@@ -1527,18 +1567,21 @@ function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], uniM
     const bunniCumulativeTvlAdjusted: number[] = [];
     const uniCumulativeTvlAdjusted: number[] = [];
 
-    let lastBunniCumulative = 0;
-    let lastUniCumulative = 0;
+    // Calculate cumulative values at runtime
+    let bunniCumulative = new BigNumber(0);
+    let uniCumulative = new BigNumber(0);
 
     allDates.forEach(date => {
         const bunni = bunniByDate.get(date);
         const uni = uniByDate.get(date);
 
-        if (bunni) lastBunniCumulative = bunni.cumulativeTvlAdjusted.times(100).toNumber();
-        if (uni) lastUniCumulative = uni.cumulativeTvlAdjusted.times(100).toNumber();
+        // Add daily TVL-adjusted markout to cumulative values
+        if (bunni) bunniCumulative = bunniCumulative.plus(bunni.tvlAdjustedMarkout);
+        if (uni) uniCumulative = uniCumulative.plus(uni.tvlAdjustedMarkout);
 
-        bunniCumulativeTvlAdjusted.push(lastBunniCumulative);
-        uniCumulativeTvlAdjusted.push(lastUniCumulative);
+        // Convert to percentage for chart
+        bunniCumulativeTvlAdjusted.push(bunniCumulative.times(100).toNumber());
+        uniCumulativeTvlAdjusted.push(uniCumulative.times(100).toNumber());
     });
 
     // Configuration for combined TVL-adjusted markout chart
@@ -1577,6 +1620,7 @@ function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], uniMarkouts: Markout
         `${uniswapPoolType} TVL-Adj (%)`.padEnd(18));
     console.log('-'.repeat(85));
 
+    // Calculate cumulative values at runtime
     let bunniCumulative = new BigNumber(0);
     let uniCumulative = new BigNumber(0);
     let bunniCumulativeTvlAdj = new BigNumber(0);
@@ -1586,10 +1630,16 @@ function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], uniMarkouts: Markout
         const bunni = bunniByDate.get(date);
         const uni = uniByDate.get(date);
 
-        if (bunni) bunniCumulative = bunni.cumulative;
-        if (uni) uniCumulative = uni.cumulative;
-        if (bunni) bunniCumulativeTvlAdj = bunni.cumulativeTvlAdjusted;
-        if (uni) uniCumulativeTvlAdj = uni.cumulativeTvlAdjusted;
+        // Add daily values to cumulative totals
+        if (bunni) {
+            bunniCumulative = bunniCumulative.plus(bunni.markout);
+            bunniCumulativeTvlAdj = bunniCumulativeTvlAdj.plus(bunni.tvlAdjustedMarkout);
+        }
+
+        if (uni) {
+            uniCumulative = uniCumulative.plus(uni.markout);
+            uniCumulativeTvlAdj = uniCumulativeTvlAdj.plus(uni.tvlAdjustedMarkout);
+        }
 
         console.log(
             date.padEnd(12),
@@ -1637,6 +1687,7 @@ async function runComparison(): Promise<void> {
     if (uniPoolId) {
         console.log('\n---------------------------------------------------\n');
         const uniCacheFile = getUniCacheFile(uniPoolId);
+        // Pass the Bunni pool's creation timestamp to ensure proper time alignment
         uniMarkouts = await calculateUniswapMarkouts(uniPoolId, uniCacheFile, bunniCreationTimestamp);
     }
 
