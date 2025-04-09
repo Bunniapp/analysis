@@ -291,8 +291,8 @@ function readCache(cacheFile: string): CachedResults | null {
             const fileContent = fs.readFileSync(cacheFile, 'utf8');
             const data = JSON.parse(fileContent, (key, value) => {
                 if (key === 'delta0' || key === 'delta1' || key === 'price0' || key === 'price1' ||
-                    key === 'markout' || key === 'cumulative' || key === 'tvlAdjustedMarkout' ||
-                    key === 'cumulativeTvlAdjusted') {
+                    key === 'markout' || key === 'tvlAdjustedMarkout'
+                ) {
                     return new BigNumber(value);
                 }
                 return value;
@@ -319,9 +319,7 @@ function readCache(cacheFile: string): CachedResults | null {
                     m.price0 instanceof BigNumber &&
                     m.price1 instanceof BigNumber &&
                     m.markout instanceof BigNumber &&
-                    m.cumulative instanceof BigNumber &&
-                    (m.tvlAdjustedMarkout === undefined || m.tvlAdjustedMarkout instanceof BigNumber) &&
-                    (m.cumulativeTvlAdjusted === undefined || m.cumulativeTvlAdjusted instanceof BigNumber)
+                    (m.tvlAdjustedMarkout === undefined || m.tvlAdjustedMarkout instanceof BigNumber)
                 )) &&
                 // Validate prices structure if it exists
                 (data.prices === undefined ||
@@ -395,14 +393,15 @@ async function getPoolInfo(poolId: string): Promise<Pool> {
 }
 
 // Get all swaps for a pool, starting from a specific timestamp
-async function getAllSwaps(poolId: string, startTime: number = 0): Promise<Swap[]> {
+async function getAllSwaps(poolId: string, startTime: number = 0, customEndTime?: number): Promise<Swap[]> {
     console.log(`Fetching swaps from timestamp ${startTime}...`);
 
     const swaps: Swap[] = [];
     let skip = 0;
 
-    const endTime = Math.floor(Date.now() / 1000 / 86400) * 86400; // don't need today's data
-    console.log(`Fetching swaps until timestamp ${endTime}...`);
+    // Use custom end time if provided, otherwise use today's start (don't need today's data)
+    const endTime = customEndTime || Math.floor(Date.now() / 1000 / 86400) * 86400;
+    console.log(`Fetching swaps until timestamp ${endTime} (${new Date(endTime * 1000).toISOString()})...`);
 
     while (true) {
         const data = await request<{ swaps: Swap[] }>(endpoint, SWAPS_QUERY, {
@@ -759,14 +758,15 @@ async function getUniPoolInfo(poolId: string): Promise<UniPool> {
 }
 
 // Get all Uniswap/Aerodrome swaps for a pool, starting from a specific timestamp
-async function getAllUniSwaps(poolId: string, startTime: number = 0): Promise<UniSwap[]> {
+async function getAllUniSwaps(poolId: string, startTime: number = 0, customEndTime?: number): Promise<UniSwap[]> {
     console.log(`Fetching ${uniswapPoolType} swaps from timestamp ${startTime}...`);
 
     const swaps: UniSwap[] = [];
     let skip = 0;
 
-    const endTime = Math.floor(Date.now() / 1000 / 86400) * 86400; // don't need today's data
-    console.log(`Fetching swaps until timestamp ${endTime}...`);
+    // Use custom end time if provided, otherwise use today's start (don't need today's data)
+    const endTime = customEndTime || Math.floor(Date.now() / 1000 / 86400) * 86400;
+    console.log(`Fetching swaps until timestamp ${endTime} (${new Date(endTime * 1000).toISOString()})...`);
 
     while (true) {
         const data = await request<{ swaps: UniSwap[] }>(uniEndpoint, UNI_SWAPS_QUERY, {
@@ -1048,26 +1048,72 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
             cachedResults.poolId === poolId &&
             cachedResults.network === (uniswapPoolType === 'Uniswap' ? network : 'aerodrome');
 
-        let cachedStartTime = 0;
-        if (hasCachedData && cachedResults.lastTimestamp) {
-            cachedStartTime = parseInt(cachedResults.lastTimestamp);
-            console.log(`Found cached data with last timestamp ${cachedStartTime} (${new Date(cachedStartTime * 1000).toISOString()})`);
+        // Get information about cached data if available
+        let oldestCachedTimestamp = 0;
+        let lastCachedTimestamp = 0;
+
+        if (hasCachedData && cachedResults.markouts && cachedResults.markouts.length > 0) {
+            // Cached markouts should already be sorted, so we can use the first and last directly
+            // Get the oldest timestamp from the first markout
+            oldestCachedTimestamp = Date.parse(cachedResults.markouts[0].date) / 1000;
+            console.log(`Found cached data with oldest timestamp ${oldestCachedTimestamp} (${new Date(oldestCachedTimestamp * 1000).toISOString()})`);
+
+            // Get the last processed timestamp
+            if (cachedResults.lastTimestamp) {
+                lastCachedTimestamp = parseInt(cachedResults.lastTimestamp);
+                console.log(`Last processed timestamp: ${lastCachedTimestamp} (${new Date(lastCachedTimestamp * 1000).toISOString()})`);
+            } else {
+                // If no lastTimestamp, use the newest markout date
+                lastCachedTimestamp = Date.parse(cachedResults.markouts[cachedResults.markouts.length - 1].date) / 1000;
+                console.log(`No lastTimestamp found, using newest markout date: ${lastCachedTimestamp} (${new Date(lastCachedTimestamp * 1000).toISOString()})`);
+            }
         }
 
-        // Determine if we need to fetch historical data
+        // Determine data fetching strategy
         let needHistoricalData = false;
-        if (hasCachedData && bunniStartTimestamp > 0 && bunniStartTimestamp < cachedStartTime) {
-            // If Bunni pool's inception is before the oldest cached data point, we need to fetch missing data
-            needHistoricalData = true;
-            console.log(`Bunni pool's inception (${new Date(bunniStartTimestamp * 1000).toISOString()}) is before the oldest cached data point (${new Date(cachedStartTime * 1000).toISOString()})`);
-            console.log(`Will fetch missing historical data from ${bunniStartTimestamp} to ${cachedStartTime}`);
-            startTime = bunniStartTimestamp;
-        } else if (hasCachedData && !needHistoricalData) {
-            // If we have cached data and don't need historical data, start from the last timestamp
-            startTime = cachedStartTime;
-            console.log(`Will fetch new swaps after timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+        let needNewData = false;
+
+        // Variables to track what data we need to fetch
+        let historicalStartTime = 0;
+        let historicalEndTime = 0;
+        let newDataStartTime = 0;
+
+        if (hasCachedData) {
+            // Check if we need historical data (before oldest cached data)
+            if (bunniStartTimestamp > 0 && bunniStartTimestamp < oldestCachedTimestamp) {
+                needHistoricalData = true;
+                historicalStartTime = bunniStartTimestamp;
+                historicalEndTime = oldestCachedTimestamp;
+                console.log(`Bunni pool's inception (${new Date(bunniStartTimestamp * 1000).toISOString()}) is before the oldest cached data point`);
+                console.log(`Will need to fetch missing historical data from ${historicalStartTime} to ${historicalEndTime}`);
+            }
+
+            // Check if we need new data (after last cached data)
+            if (lastCachedTimestamp > 0) {
+                needNewData = true;
+                newDataStartTime = lastCachedTimestamp;
+                console.log(`Will need to fetch new data after ${newDataStartTime} (${new Date(newDataStartTime * 1000).toISOString()})`);
+            }
+
+            // Determine which data to fetch first
+            if (needHistoricalData && needNewData) {
+                // We need both historical and new data
+                // For now, let's fetch the historical data first
+                console.log(`Need to fetch both historical and new data. Fetching historical data first...`);
+                startTime = historicalStartTime;
+                // We'll fetch new data in a separate query after processing historical data
+            } else if (needHistoricalData) {
+                // Only need historical data
+                startTime = historicalStartTime;
+                console.log(`Setting start time to Bunni pool's inception: ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+            } else if (needNewData) {
+                // Only need new data
+                startTime = newDataStartTime;
+                console.log(`Setting start time to last cached timestamp: ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+            }
         } else {
-            console.log(`Will fetch all swaps from timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+            // Case 3: No cached data, fetch everything from the determined start time
+            console.log(`No cached data available. Will fetch all swaps from timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
         }
 
         // Show token info if debug mode
@@ -1077,16 +1123,50 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
             console.log(`Token 1: ${pool.token1.symbol} (ID: ${pool.token1.id})`);
         }
 
-        // Fetch swaps since the determined start time
-        const newSwaps = await getAllUniSwaps(poolId, startTime);
+        // Fetch swaps based on what data we need
+        let allSwaps: UniSwap[] = [];
+
+        // Case 1: We need both historical and new data
+        if (needHistoricalData && needNewData) {
+            console.log(`Need to fetch both historical and new data`);
+
+            // First, fetch historical data (from Bunni inception to oldest cached data)
+            console.log(`Fetching historical swaps from ${historicalStartTime} to ${historicalEndTime}`);
+            const historicalSwaps = await getAllUniSwaps(poolId, historicalStartTime, historicalEndTime);
+            console.log(`Fetched ${historicalSwaps.length} historical swaps`);
+
+            // Then, fetch new data (from last cached timestamp to now)
+            console.log(`Fetching new swaps after ${newDataStartTime}`);
+            const recentSwaps = await getAllUniSwaps(poolId, newDataStartTime);
+            console.log(`Fetched ${recentSwaps.length} new swaps`);
+
+            // Combine both sets of swaps
+            allSwaps = [...historicalSwaps, ...recentSwaps];
+            console.log(`Combined ${allSwaps.length} total swaps`);
+        }
+        // Case 2: We only need historical data
+        else if (needHistoricalData) {
+            console.log(`Fetching historical swaps from ${historicalStartTime} to ${historicalEndTime}`);
+            allSwaps = await getAllUniSwaps(poolId, historicalStartTime, historicalEndTime);
+        }
+        // Case 3: We only need new data
+        else if (needNewData) {
+            console.log(`Fetching new swaps after ${newDataStartTime}`);
+            allSwaps = await getAllUniSwaps(poolId, newDataStartTime);
+        }
+        // Case 4: We're fetching all data from scratch
+        else {
+            console.log(`Fetching all swaps from ${startTime}`);
+            allSwaps = await getAllUniSwaps(poolId, startTime);
+        }
 
         // If no swaps found, handle accordingly
-        if (newSwaps.length === 0 && !hasCachedData) {
+        if (allSwaps.length === 0 && !hasCachedData) {
             console.log('No swaps found for this pool.');
             return [];
         }
 
-        if (newSwaps.length === 0 && hasCachedData) {
+        if (allSwaps.length === 0 && hasCachedData) {
             console.log('No new swaps found since last update. Using cached markouts.');
 
             // Filter cached markouts to only include those after Bunni pool's inception if needed
@@ -1110,19 +1190,19 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
         }
 
         // Get the latest timestamp from the new swaps for caching
-        const latestTimestamp = newSwaps.length > 0 ?
-            newSwaps[newSwaps.length - 1].timestamp :
+        const latestTimestamp = allSwaps.length > 0 ?
+            allSwaps[allSwaps.length - 1].timestamp :
             startTime.toString();
 
         // Calculate total swap count
         const totalSwapCount = hasCachedData ?
-            cachedResults.swapCount + newSwaps.length :
-            newSwaps.length;
+            cachedResults.swapCount + allSwaps.length :
+            allSwaps.length;
 
         // Show first few swaps in debug mode
-        if (debug && newSwaps.length > 0) {
+        if (debug && allSwaps.length > 0) {
             console.log(`\nSample Swap Data (First 3):`);
-            newSwaps.slice(0, 3).forEach((swap: UniSwap, i: number) => {
+            allSwaps.slice(0, 3).forEach((swap: UniSwap, i: number) => {
                 console.log(`Swap ${i + 1}:`);
                 console.log(`  Timestamp: ${swap.timestamp} (${new Date(parseInt(swap.timestamp) * 1000).toISOString()})`);
                 console.log(`  Amount0: ${swap.amount0}`);
@@ -1141,7 +1221,7 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
 
         // Get all timestamps we need prices for
         const allTimestamps: number[] = [];
-        newSwaps.forEach((swap: UniSwap) => {
+        allSwaps.forEach((swap: UniSwap) => {
             const dayTs = getDayTimestamp(parseInt(swap.timestamp));
             allTimestamps.push(dayTs + dayInSeconds);
         });
@@ -1200,13 +1280,13 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
         }
 
         // Get relevant hour timestamps from the swaps
-        const relevantHourTimestamps = getRelevantHourTimestamps(newSwaps);
+        const relevantHourTimestamps = getRelevantHourTimestamps(allSwaps);
 
         // Fetch hourly TVL data only for the relevant hours
         const hourlyData = await getUniPoolHourData(poolId, relevantHourTimestamps);
 
         // Process swaps and calculate markouts
-        const newMarkouts = processUniSwapsAndCalculateMarkouts(newSwaps, pool, prices, hourlyData);
+        const newMarkouts = processUniSwapsAndCalculateMarkouts(allSwaps, pool, prices, hourlyData);
 
         // Merge with cached markouts if available
         let combinedMarkouts = newMarkouts;
@@ -1290,7 +1370,7 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
         displayMarkouts(combinedMarkouts, pool.token0.symbol, pool.token1.symbol);
 
         console.log(`\nTotal swaps processed: ${totalSwapCount}`);
-        console.log(`New swaps processed: ${newSwaps.length}`);
+        console.log(`New swaps processed: ${allSwaps.length}`);
         console.log(`Results cached to: ${cacheFile}`);
 
         return combinedMarkouts;
@@ -1322,18 +1402,44 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             cachedResults.poolId === poolId &&
             cachedResults.network === network;
 
-        if (hasCachedData) {
-            console.log('Found cached data, will fetch only new swaps...');
+        // Get information about cached data if available
+        let oldestCachedTimestamp = 0;
+        let lastCachedTimestamp = 0;
 
-            // Get the last processed timestamp to use as our starting point
+        if (hasCachedData && cachedResults.markouts && cachedResults.markouts.length > 0) {
+            // Sort markouts by date to ensure we get the correct oldest and newest
+            const sortedMarkouts = [...cachedResults.markouts].sort(
+                (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
+            );
+
+            // Get the oldest timestamp from the first markout
+            oldestCachedTimestamp = Date.parse(sortedMarkouts[0].date) / 1000;
+            console.log(`Found cached data with oldest timestamp ${oldestCachedTimestamp} (${new Date(oldestCachedTimestamp * 1000).toISOString()})`);
+
+            // Get the last processed timestamp
             if (cachedResults.lastTimestamp) {
-                startTime = parseInt(cachedResults.lastTimestamp);
-                console.log(`Will fetch swaps after timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
+                lastCachedTimestamp = parseInt(cachedResults.lastTimestamp);
+                console.log(`Last processed timestamp: ${lastCachedTimestamp} (${new Date(lastCachedTimestamp * 1000).toISOString()})`);
             } else {
-                console.log('No lastTimestamp found in cache, will fetch all swaps');
+                // If no lastTimestamp, use the newest markout date
+                lastCachedTimestamp = Date.parse(sortedMarkouts[sortedMarkouts.length - 1].date) / 1000;
+                console.log(`No lastTimestamp found, using newest markout date: ${lastCachedTimestamp} (${new Date(lastCachedTimestamp * 1000).toISOString()})`);
+            }
+        }
+
+        // Determine data fetching strategy
+        if (hasCachedData) {
+            // Check if we need new data (after last cached data)
+            if (lastCachedTimestamp > 0) {
+                console.log(`Will need to fetch new data after ${lastCachedTimestamp} (${new Date(lastCachedTimestamp * 1000).toISOString()})`);
+
+                // Start from last cached timestamp to get new data
+                startTime = lastCachedTimestamp;
+                console.log(`Setting start time to last cached timestamp: ${startTime} (${new Date(startTime * 1000).toISOString()})`);
             }
         } else {
-            console.log('No valid cached results found, calculating markouts from scratch');
+            // No cached data, fetch everything from the pool creation timestamp
+            console.log(`No cached data available. Will fetch all swaps from timestamp ${startTime} (${new Date(startTime * 1000).toISOString()})`);
         }
 
         // Show token info if debug mode
@@ -1343,17 +1449,20 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             console.log(`Token 1: ${pool.currency1.symbol} (ID: ${pool.currency1.id})`);
         }
 
-        // Fetch new swaps since the last processed timestamp
-        const newSwaps = await getAllSwaps(poolId, startTime);
+        // Fetch swaps based on what data we need
+        let allSwaps: Swap[] = [];
 
-        // If no new swaps and no cached data, nothing to do
-        if (newSwaps.length === 0 && !hasCachedData) {
+        // For Bunni pools, we just need to fetch from the start time to now
+        allSwaps = await getAllSwaps(poolId, startTime);
+
+        // If no swaps found and no cached data, nothing to do
+        if (allSwaps.length === 0 && !hasCachedData) {
             console.log('No swaps found for this pool.');
             return [];
         }
 
-        // If no new swaps but we have cached data, just display the cached results
-        if (newSwaps.length === 0 && hasCachedData) {
+        // If no swaps but we have cached data, just display the cached results
+        if (allSwaps.length === 0 && hasCachedData) {
             console.log('No new swaps found since last update. Using cached markouts.');
             displayMarkouts(
                 cachedResults.markouts,
@@ -1365,20 +1474,20 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             return cachedResults.markouts;
         }
 
-        // Get the latest timestamp from the new swaps for caching
-        const latestTimestamp = newSwaps.length > 0 ?
-            newSwaps[newSwaps.length - 1].timestamp :
+        // Get the latest timestamp from the swaps for caching
+        const latestTimestamp = allSwaps.length > 0 ?
+            allSwaps[allSwaps.length - 1].timestamp :
             startTime.toString();
 
         // Calculate total swap count (cached + new)
         const totalSwapCount = hasCachedData ?
-            cachedResults.swapCount + newSwaps.length :
-            newSwaps.length;
+            cachedResults.swapCount + allSwaps.length :
+            allSwaps.length;
 
         // Show first few swaps in debug mode
-        if (debug && newSwaps.length > 0) {
+        if (debug && allSwaps.length > 0) {
             console.log(`\nSample Swap Data (First 3):`);
-            newSwaps.slice(0, 3).forEach((swap: Swap, i: number) => {
+            allSwaps.slice(0, 3).forEach((swap: Swap, i: number) => {
                 console.log(`Swap ${i + 1}:`);
                 console.log(`  Direction: ${swap.zeroForOne ? 'Zero For One' : 'One For Zero'}`);
                 console.log(`  Input Amount: ${swap.inputAmount}`);
@@ -1403,7 +1512,7 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
 
         // Get all timestamps we need prices for
         const allTimestamps: number[] = [];
-        newSwaps.forEach((swap: Swap) => {
+        allSwaps.forEach((swap: Swap) => {
             const dayTs = getDayTimestamp(parseInt(swap.timestamp));
             allTimestamps.push(dayTs + dayInSeconds);
         });
@@ -1462,8 +1571,7 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
         }
 
         // Process swaps and calculate markouts in a single pass
-        // Only process the new swaps
-        const newMarkouts = processSwapsAndCalculateMarkouts(newSwaps, pool, prices);
+        const newMarkouts = processSwapsAndCalculateMarkouts(allSwaps, pool, prices);
 
         // Merge with cached markouts if available
         let combinedMarkouts = newMarkouts;
@@ -1541,7 +1649,7 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
         displayMarkouts(combinedMarkouts, pool.currency0.symbol, pool.currency1.symbol);
 
         console.log(`\nTotal swaps processed: ${totalSwapCount}`);
-        console.log(`New swaps processed: ${newSwaps.length}`);
+        console.log(`New swaps processed: ${allSwaps.length}`);
         console.log(`Results cached to: ${cacheFile}`);
 
         return combinedMarkouts;
