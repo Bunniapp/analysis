@@ -1190,9 +1190,9 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
         }
 
         // Get the latest timestamp from the new swaps for caching
-        const latestTimestamp = allSwaps.length > 0 ?
-            allSwaps[allSwaps.length - 1].timestamp :
-            startTime.toString();
+        const latestTimestamp = Math.max(allSwaps.length > 0 ?
+            Number.parseInt(allSwaps[allSwaps.length - 1].timestamp) :
+            startTime, lastCachedTimestamp);
 
         // Calculate total swap count
         const totalSwapCount = hasCachedData ?
@@ -1295,34 +1295,33 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
             // Create a map of dates to markouts for easy lookup and merging
             const markoutsByDate = new Map<string, MarkoutDatapoint>();
 
-            // Add cached markouts to the map
+            // Add cached markouts to the map first
             cachedResults.markouts.forEach(markout => {
                 markoutsByDate.set(markout.date, markout);
             });
 
-            // Add or update with new markouts (without relying on cached cumulative values)
+            // Only add new markouts for dates that don't exist in the cache
+            // This ensures we preserve cached data and only append/prepend new data
+            let newDatesAdded = 0;
             newMarkouts.forEach(markout => {
-                markoutsByDate.set(markout.date, markout);
+                if (!markoutsByDate.has(markout.date)) {
+                    markoutsByDate.set(markout.date, markout);
+                    newDatesAdded++;
+                }
             });
 
             // Convert back to array and sort by date
             combinedMarkouts = Array.from(markoutsByDate.values())
                 .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-            console.log(`Combined markouts: ${combinedMarkouts.length}`);
+            console.log(`Combined markouts: ${combinedMarkouts.length} (${newDatesAdded} new dates added)`);
         } else {
             console.log(`Using only new markouts: ${newMarkouts.length}`);
         }
 
-        // Filter markouts to only include those after Bunni pool's inception if needed
-        if (bunniStartTimestamp > 0) {
-            const bunniStartDate = formatDate(bunniStartTimestamp);
-            const originalLength = combinedMarkouts.length;
-            combinedMarkouts = combinedMarkouts.filter(m => {
-                return new Date(m.date) >= new Date(bunniStartDate);
-            });
-            console.log(`Filtered markouts to only include those after Bunni pool's inception: ${combinedMarkouts.length} of ${originalLength}`);
-        }
+        // Note: We no longer filter the combinedMarkouts here
+        // Instead, we filter the markouts before displaying them
+        // This ensures we cache all data but only display the relevant time period
 
         // Create a filtered version of prices that excludes zero values for caching
         const pricesToCache: PriceData = {
@@ -1354,7 +1353,7 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
                 currency1: pool.token1.symbol
             },
             swapCount: totalSwapCount,
-            lastTimestamp: latestTimestamp,
+            lastTimestamp: latestTimestamp.toString(),
             // Store the combined markouts in the cache (without cumulative values)
             markouts: combinedMarkouts,
             prices: {
@@ -1366,14 +1365,25 @@ async function calculateUniswapMarkouts(poolId: string, cacheFile: string, bunni
 
         writeCache(resultsToCache, cacheFile);
 
-        // Display results
-        displayMarkouts(combinedMarkouts, pool.token0.symbol, pool.token1.symbol);
+        // Filter markouts to only display those after Bunni pool's inception if needed
+        let displayMarkoutsData = combinedMarkouts;
+        if (bunniStartTimestamp > 0) {
+            const bunniStartDate = formatDate(bunniStartTimestamp);
+            displayMarkoutsData = combinedMarkouts.filter(m => {
+                return new Date(m.date) >= new Date(bunniStartDate);
+            });
+            console.log(`Displaying only markouts after Bunni pool's inception: ${displayMarkoutsData.length} of ${combinedMarkouts.length}`);
+        }
+
+        // Display filtered results
+        displayMarkouts(displayMarkoutsData, pool.token0.symbol, pool.token1.symbol);
 
         console.log(`\nTotal swaps processed: ${totalSwapCount}`);
         console.log(`New swaps processed: ${allSwaps.length}`);
         console.log(`Results cached to: ${cacheFile}`);
 
-        return combinedMarkouts;
+        // Return the filtered markouts for comparison
+        return displayMarkoutsData;
     } catch (error) {
         console.error('Error:', (error as Error).message);
         return [];
@@ -1464,20 +1474,24 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
         // If no swaps but we have cached data, just display the cached results
         if (allSwaps.length === 0 && hasCachedData) {
             console.log('No new swaps found since last update. Using cached markouts.');
+
+            // For Bunni pools, we don't need to filter by inception date since this is the reference pool
+            let displayMarkoutsData = cachedResults.markouts;
+
             displayMarkouts(
-                cachedResults.markouts,
+                displayMarkoutsData,
                 pool.currency0.symbol,
                 pool.currency1.symbol
             );
             console.log(`\nTotal swaps processed: ${cachedResults.swapCount}`);
             console.log(`Cache file: ${cacheFile}`);
-            return cachedResults.markouts;
+            return displayMarkoutsData;
         }
 
         // Get the latest timestamp from the swaps for caching
-        const latestTimestamp = allSwaps.length > 0 ?
-            allSwaps[allSwaps.length - 1].timestamp :
-            startTime.toString();
+        const latestTimestamp = Math.max(allSwaps.length > 0 ?
+            Number.parseInt(allSwaps[allSwaps.length - 1].timestamp) :
+            startTime, lastCachedTimestamp);
 
         // Calculate total swap count (cached + new)
         const totalSwapCount = hasCachedData ?
@@ -1580,21 +1594,26 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             // Create a map of dates to markouts for easy lookup and merging
             const markoutsByDate = new Map<string, MarkoutDatapoint>();
 
-            // Add cached markouts to the map
+            // Add cached markouts to the map first
             cachedResults.markouts.forEach(markout => {
                 markoutsByDate.set(markout.date, markout);
             });
 
-            // Add or update with new markouts (without relying on cached cumulative values)
+            // Only add new markouts for dates that don't exist in the cache
+            // This ensures we preserve cached data and only append/prepend new data
+            let newDatesAdded = 0;
             newMarkouts.forEach(markout => {
-                markoutsByDate.set(markout.date, markout);
+                if (!markoutsByDate.has(markout.date)) {
+                    markoutsByDate.set(markout.date, markout);
+                    newDatesAdded++;
+                }
             });
 
             // Convert back to array and sort by date
             combinedMarkouts = Array.from(markoutsByDate.values())
                 .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
 
-            console.log(`Combined markouts: ${combinedMarkouts.length}`);
+            console.log(`Combined markouts: ${combinedMarkouts.length} (${newDatesAdded} new dates added)`);
         } else {
             console.log(`Using only new markouts: ${newMarkouts.length}`);
         }
@@ -1633,7 +1652,7 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
                 currency1: pool.currency1.symbol
             },
             swapCount: totalSwapCount,
-            lastTimestamp: latestTimestamp,
+            lastTimestamp: latestTimestamp.toString(),
             // Store the combined markouts in the cache (without cumulative values)
             markouts: combinedMarkouts,
             prices: {
@@ -1645,14 +1664,19 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
 
         writeCache(resultsToCache, cacheFile);
 
+        // For Bunni pools, we don't need to filter by inception date since this is the reference pool
+        // But we'll still create a display copy for consistency
+        let displayMarkoutsData = combinedMarkouts;
+
         // Display results
-        displayMarkouts(combinedMarkouts, pool.currency0.symbol, pool.currency1.symbol);
+        displayMarkouts(displayMarkoutsData, pool.currency0.symbol, pool.currency1.symbol);
 
         console.log(`\nTotal swaps processed: ${totalSwapCount}`);
         console.log(`New swaps processed: ${allSwaps.length}`);
         console.log(`Results cached to: ${cacheFile}`);
 
-        return combinedMarkouts;
+        // Return the display markouts for comparison
+        return displayMarkoutsData;
     } catch (error) {
         console.error('Error:', (error as Error).message);
         return [];
