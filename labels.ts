@@ -57,6 +57,7 @@ export const LABELS: Record<string, Label> = {
     "0x00000688768803bbd44095770895ad27ad6b0d95": { name: "1inch Filler (?)", category: "Retail" },
     "0xf1ceb16d94083606db7f4d98400554f17125483b": { name: "1inch Filler (?)", category: "Retail" },
     "0xcea8aaa918bc6c19e5b77841ebd77ff3188385af": { name: "Universal Gelato Task (?)", category: "Retail" },
+    "0x0000000000bbf5c5fd284e657f01bd000933c96d": { name: "ParaSwap Delta V2", category: "Retail" },
     "0x7161f940d3ca88e4035d7b7fbde2a2870d176f87": { name: "MEV Bot (0x7161f9)", category: "MEV Bot" },
     "0x9fdad0be5e7dd7c9842fd7d11e2fe8f7c06ff9b7": { name: "MEV Bot (0x9fdad0)", category: "MEV Bot" },
     "0xf00000003d31d4ab730a8e269ae547f8f76996ba": { name: "MEV Bot (0xf00000)", category: "MEV Bot" },
