@@ -1695,6 +1695,9 @@ function displayCombinedTvlAdjustedChart(bunniMarkouts: MarkoutDatapoint[], uniM
     // Get all unique dates
     const allDates = [...new Set([...bunniByDate.keys(), ...uniByDate.keys()])].sort();
 
+    // Remove the first day since Bunni pool would have negative markout from initial price difference with true price
+    allDates.shift();
+
     // Prepare data series for the combined chart
     const bunniCumulativeTvlAdjusted: number[] = [];
     const uniCumulativeTvlAdjusted: number[] = [];
@@ -1743,6 +1746,9 @@ function compareMarkouts(bunniMarkouts: MarkoutDatapoint[], uniMarkouts: Markout
 
     // Get all unique dates
     const allDates = [...new Set([...bunniByDate.keys(), ...uniByDate.keys()])].sort();
+
+    // Remove the first day since Bunni pool would have negative markout from initial price difference with true price
+    allDates.shift();
 
     // Display comparison table
     console.log('Date'.padEnd(12),
