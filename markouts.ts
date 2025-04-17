@@ -1699,6 +1699,8 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             rebalanceMarkouts.forEach(rebalanceMarkout => {
                 if (markout.date === rebalanceMarkout.date) {
                     newMarkouts[index].rebalanceMarkout = rebalanceMarkout.markout;
+                    newMarkouts[index].delta0 = markout.delta0.plus(rebalanceMarkout.delta0);
+                    newMarkouts[index].delta1 = markout.delta1.plus(rebalanceMarkout.delta1);
                 }
             })
         });
