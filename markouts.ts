@@ -30,6 +30,25 @@ interface Swap {
     pricePerVaultShare1: string;
 }
 
+interface RebalanceSwap {
+    id: string;
+    timestamp: string;
+    offeredToken: {
+        id: string
+    };
+    offeredAmount: string;
+    requestedToken: {
+        id: string
+    };
+    filledAmount: string;
+    rawBalance0: string;
+    rawBalance1: string;
+    reserve0: string;
+    reserve1: string;
+    lastPricePerVaultShare0: string;
+    lastPricePerVaultShare1: string;
+}
+
 interface UniPool {
     id: string;
     token0: {
@@ -82,6 +101,7 @@ interface MarkoutDatapoint {
     price0: BigNumber;
     price1: BigNumber;
     markout: BigNumber;
+    rebalanceMarkout?: BigNumber;
     cumulative?: BigNumber; // Optional - will be calculated at runtime
     tvlAdjustedMarkout: BigNumber; // Daily TVL-adjusted markout
     cumulativeTvlAdjusted?: BigNumber; // Optional - will be calculated at runtime
@@ -241,6 +261,39 @@ const SWAPS_QUERY = gql`
   }
 `;
 
+const REBALANCE_SWAPS_QUERY = gql`
+  query GetRebalanceSwaps($poolId: ID!, $skip: Int!, $startTime: Int!, $endTime: Int!) {
+    rebalanceOrderFilleds(
+      first: 1000,
+      skip: $skip,
+      where: {
+        pool: $poolId,
+        timestamp_gt: $startTime,
+        timestamp_lt: $endTime
+      },
+      orderBy: timestamp,
+      orderDirection: asc
+    ) {
+      id
+      timestamp
+      offeredToken {
+        id
+      }
+      offeredAmount
+      requestedToken {
+        id
+      }
+      filledAmount
+      rawBalance0
+      rawBalance1
+      reserve0
+      reserve1
+      lastPricePerVaultShare0
+      lastPricePerVaultShare1
+    }
+  }
+ `;
+
 const UNI_POOL_QUERY = gql`
   query GetUniPool($poolId: ID!) {
     pool(id: $poolId) {
@@ -291,7 +344,7 @@ function readCache(cacheFile: string): CachedResults | null {
             const fileContent = fs.readFileSync(cacheFile, 'utf8');
             const data = JSON.parse(fileContent, (key, value) => {
                 if (key === 'delta0' || key === 'delta1' || key === 'price0' || key === 'price1' ||
-                    key === 'markout' || key === 'tvlAdjustedMarkout'
+                    key === 'markout' || key === 'rebalanceMarkout' || key === 'tvlAdjustedMarkout'
                 ) {
                     return new BigNumber(value);
                 }
@@ -413,6 +466,53 @@ async function getAllSwaps(poolId: string, startTime: number = 0, customEndTime?
 
         const batch = data.swaps;
         swaps.push(...batch);
+
+        if (batch.length < 1000) break;
+        skip += 1000;
+        process.stdout.write(`\rFetched ${swaps.length} swaps...`);
+    }
+
+    console.log(`\nFound ${swaps.length} swaps since timestamp ${startTime}`);
+    return swaps;
+}
+
+async function getRebalanceSwaps(pool: Pool, poolId: string, startTime: number = 0, customEndTime?: number): Promise<Swap[]> {
+    console.log(`Fetching rebalance swaps from timestamp ${startTime}...`);
+
+    const swaps: Swap[] = [];
+    let skip = 0;
+
+    // Use custom end time if provided, otherwise use today's start (don't need today's data)
+    const endTime = customEndTime || Math.floor(Date.now() / 1000 / 86400) * 86400;
+    console.log(`Fetching rebalance swaps until timestamp ${endTime} (${new Date(endTime * 1000).toISOString()})...`);
+
+    while (true) {
+        const data = await request<{ rebalanceOrderFilleds: RebalanceSwap[] }>(endpoint, REBALANCE_SWAPS_QUERY, {
+            poolId: poolId.toLowerCase(),
+            skip,
+            startTime,
+            endTime
+        });
+
+        const batch = data.rebalanceOrderFilleds;
+
+        // Convert RebalanceSwaps to Swaps
+        batch.forEach(rebalanceSwap => {
+            const swap: Swap = {
+                id: rebalanceSwap.id,
+                timestamp: rebalanceSwap.timestamp,
+                zeroForOne: rebalanceSwap.offeredToken.id === pool.currency1.id || rebalanceSwap.requestedToken.id === pool.currency0.id,
+                inputAmount: rebalanceSwap.filledAmount,
+                outputAmount: rebalanceSwap.offeredAmount,
+                rawBalance0: rebalanceSwap.rawBalance0,
+                rawBalance1: rebalanceSwap.rawBalance1,
+                reserve0: rebalanceSwap.reserve0,
+                reserve1: rebalanceSwap.reserve1,
+                pricePerVaultShare0: rebalanceSwap.lastPricePerVaultShare0,
+                pricePerVaultShare1: rebalanceSwap.lastPricePerVaultShare1
+            };
+            swaps.push(swap);
+        });
 
         if (batch.length < 1000) break;
         skip += 1000;
@@ -677,6 +777,7 @@ function processSwapsAndCalculateMarkouts(
             price0,
             price1,
             markout: dailyMarkout,
+            rebalanceMarkout: new BigNumber(0),
             tvlAdjustedMarkout: day.tvlAdjustedMarkout
         });
     }
@@ -714,6 +815,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
         'Price 0'.padEnd(8),
         'Price 1'.padEnd(8),
         'Daily Markout ($)'.padEnd(15),
+        'Rebalance Markout ($)'.padEnd(15),
         'Cum Markout ($)'.padEnd(15),
         'TVL-Adj Markout'.padEnd(15),
         'Cum TVL-Adj Markout'.padEnd(15)
@@ -729,6 +831,7 @@ function displayMarkouts(markouts: MarkoutDatapoint[], currency0Symbol: string, 
             `$${m.price0.toFixed(2)}`.padEnd(10),
             `$${m.price1.toFixed(2)}`.padEnd(10),
             `$${m.markout.toFixed(2)}`.padEnd(15),
+            `$${m.rebalanceMarkout ? m.rebalanceMarkout.toFixed(2) : 'N/A'}`.padEnd(15),
             `$${m.cumulative.toFixed(2)}`.padEnd(15),
             `${m.tvlAdjustedMarkout.times(100).toFixed(6)}%`.padEnd(15),
             `${m.cumulativeTvlAdjusted.times(100).toFixed(6)}%`.padEnd(15)
@@ -1459,11 +1562,12 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
             console.log(`Token 1: ${pool.currency1.symbol} (ID: ${pool.currency1.id})`);
         }
 
-        // Fetch swaps based on what data we need
-        let allSwaps: Swap[] = [];
-
         // For Bunni pools, we just need to fetch from the start time to now
-        allSwaps = await getAllSwaps(poolId, startTime);
+        let allSwaps: Swap[] = await getAllSwaps(poolId, startTime);
+        let rebalanceSwaps: Swap[] = await getRebalanceSwaps(pool, poolId, startTime);
+
+        // Merge rebalance swaps into allSwaps sorted by timestamp in chronological order
+        allSwaps = [...allSwaps, ...rebalanceSwaps].sort((a, b) => parseInt(a.timestamp) - parseInt(b.timestamp));
 
         // If no swaps found and no cached data, nothing to do
         if (allSwaps.length === 0 && !hasCachedData) {
@@ -1586,6 +1690,20 @@ async function calculateBunniMarkouts(poolId: string, cacheFile: string): Promis
 
         // Process swaps and calculate markouts in a single pass
         const newMarkouts = processSwapsAndCalculateMarkouts(allSwaps, pool, prices);
+
+        // Also compute markouts from rebalance swaps separately
+        const rebalanceMarkouts = processSwapsAndCalculateMarkouts(rebalanceSwaps, pool, prices);
+
+        // Merge rebalance markouts into markouts of the same dates (in the rebalanceMarkout field)
+        newMarkouts.forEach((markout, index) => {
+            rebalanceMarkouts.forEach(rebalanceMarkout => {
+                if (markout.date === rebalanceMarkout.date) {
+                    newMarkouts[index].rebalanceMarkout = rebalanceMarkout.markout;
+                    newMarkouts[index].delta0 = markout.delta0.plus(rebalanceMarkout.delta0);
+                    newMarkouts[index].delta1 = markout.delta1.plus(rebalanceMarkout.delta1);
+                }
+            })
+        });
 
         // Merge with cached markouts if available
         let combinedMarkouts = newMarkouts;
