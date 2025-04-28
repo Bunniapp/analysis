@@ -12,7 +12,7 @@ export const LABELS: Record<string, Label> = {
     "0x5093ef099346ffe58283207e221dada47bfd862a": { name: "MEV Bot (0x5093ef)", category: "MEV Bot" },
     "0xeeeeee9ec4769a09a76a83c7bc42b185872860ee": { name: "Relay Router", category: "Retail" },
     "0xa1bea5fe917450041748dbbbe7e9ac57a4bbebab": { name: "Relay Router", category: "Retail" },
-    "0x2d5805a423d6ce771f06972ad4499f120902631a": { name: "MEV Bot (0x2d5805)", category: "MEV Bot" },
+    "0x2d5805a423d6ce771f06972ad4499f120902631a": { name: "1inch filler (?)", category: "Retail" },
     "0x0000000071727de22e5e9d8baf0edac6f37da032": { name: "ERC-4337 Entry Point", category: "Retail" },
     "0xfb33f10738d6e83a049678c1fcb9eb8b78d1417f": { name: "0x MetaTxn Settler", category: "Retail" },
     "0x9ed181da6b359c3ee23c1d6912a6b4b0c349a165": { name: "0x MetaTxn Settler", category: "Retail" },
